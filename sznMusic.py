@@ -67,8 +67,13 @@ class MusicCore(commands.Cog):
             "format": "bestaudio/best",
             "noplaylist": True,
             "quiet": True,
-            'cookiefile': self.cookie_file if self.cookie_file else None,
+            "cookiefile": self.cookie_file if self.cookie_file else None,
             "default_search": "ytsearch",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["mweb", "ios", "android", "tv"]
+                }
+            }
         }
 
     def format_duration(self, duration):
