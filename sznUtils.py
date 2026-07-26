@@ -142,16 +142,22 @@ async def fetch_stealth_cookies() -> str | None:
 # ==============================================================================
 
 def get_cookie_file_path() -> str | None:
+    # 1. Prioridad: Archivo cookies.txt directo en la raíz del proyecto
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 50:
+        return os.path.abspath("cookies.txt")
+
+    # 2. Fallback: Base de datos SQLite / Variable de entorno
     cookies_content = load_config('cookies') or os.getenv('cookies')
-    if not cookies_content or len(cookies_content.strip()) < 50:
-        return None
-    try:
-        temp = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix='.txt', newline='\n')
-        temp.write(cookies_content)
-        temp.close()
-        return temp.name
-    except Exception:
-        return None
+    if cookies_content and len(cookies_content.strip()) >= 50:
+        try:
+            temp = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix='.txt', newline='\n')
+            temp.write(cookies_content)
+            temp.close()
+            return temp.name
+        except Exception:
+            pass
+
+    return None
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
