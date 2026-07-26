@@ -5,7 +5,7 @@ import traceback
 import discord
 from discord.ext import commands
 from database import setup_database
-from sznUtils import load_config
+from sznUtils import load_config, fetch_stealth_cookies
 
 # Configuración básica de logs
 logging.basicConfig(level=logging.INFO)
@@ -33,9 +33,13 @@ async def main():
     setup_database()
 
     cookies = load_config("cookies")
+    if not cookies:
+        print("🔑 Cookies no encontradas en BD. Generando automáticamente vía Playwright Stealth...")
+        cookies = await fetch_stealth_cookies()
+
     if cookies:
         os.environ["cookies"] = cookies
-        print("🔐 Cookies cargadas desde la base de datos.")
+        print("🔐 Cookies cargadas en variables de entorno.")
 
     try:
         await bot.load_extension('sznDB')

@@ -64,31 +64,57 @@ def json_to_netscape(cookies_json: list | str) -> str:
 
 async def fetch_stealth_cookies() -> str | None:
     """
-    Utiliza Playwright + playwright_stealth para obtener cookies frescas de YouTube automáticamente.
+    Utiliza Playwright + playwright_stealth para obtener cookies frescas de YouTube en segundo plano.
     """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        print("ℹ️ Playwright no está instalado. Si YouTube bloquea peticiones, instala 'playwright' y 'playwright-stealth'.")
+        print("ℹ️ Playwright no está instalado. Instala 'playwright' y 'playwright-stealth'.")
         return None
 
     try:
         print("🕵️ Generando cookies de YouTube en segundo plano vía Playwright Stealth...")
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled"
+                ]
+            )
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720}
             )
             page = await context.new_page()
 
             try:
                 from playwright_stealth import stealth_async
                 await stealth_async(page)
-            except ImportError:
-                print("ℹ️ playwright_stealth no disponible, ejecutando Playwright estándar.")
+            except Exception as e:
+                print(f"ℹ️ Nota sobre stealth: {e}")
 
-            await page.goto("https://www.youtube.com", wait_until="networkidle", timeout=15000)
+            # Visitar portada de YouTube
+            await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2)
+
+            # Intentar hacer clic en el botón de aceptar consentimiento si aparece
+            try:
+                btn = page.locator("button[aria-label*='Accept'], button[aria-label*='Aceptar']").first
+                if await btn.is_visible(timeout=3000):
+                    await btn.click()
+                    await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # Visitar una página de video para recibir las cookies de reproducción (PREF / VISITOR_INFO1_LIVE)
+            try:
+                await page.goto("https://www.youtube.com/watch?v=dQw4w9WgWgQ", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(2)
+            except Exception:
+                pass
 
             cookies = await context.cookies()
             await browser.close()
@@ -96,7 +122,7 @@ async def fetch_stealth_cookies() -> str | None:
             if cookies:
                 netscape_content = json_to_netscape(cookies)
                 save_config("cookies", netscape_content)
-                print("✅ Cookies generadas y guardadas exitosamente.")
+                print("✅ Cookies generadas y guardadas exitosamente vía Playwright Stealth.")
                 return netscape_content
     except Exception as e:
         print(f"❌ Error al obtener cookies stealth con Playwright: {e}")
