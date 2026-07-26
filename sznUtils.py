@@ -39,6 +39,8 @@ def load_config(key: str) -> str | None:
         print(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
     return None
 
+import time
+
 def json_to_netscape(cookies_json: list | str) -> str:
     """Convierte una lista o string JSON de cookies a formato Netscape."""
     try:
@@ -47,6 +49,7 @@ def json_to_netscape(cookies_json: list | str) -> str:
             raise ValueError("JSON no válido para cookies.")
 
         lines = ["# Netscape HTTP Cookie File"]
+        default_exp = int(time.time() + 86400 * 365)  # Expiración por defecto: 1 año
         for cookie in parsed:
             if not isinstance(cookie, dict) or "name" not in cookie or "value" not in cookie:
                 continue
@@ -54,7 +57,13 @@ def json_to_netscape(cookies_json: list | str) -> str:
             flag = "TRUE" if domain.startswith(".") else "FALSE"
             path = cookie.get("path", "/")
             secure = "TRUE" if cookie.get("secure", False) else "FALSE"
-            expires = str(int(cookie.get("expirationDate", cookie.get("expires", 2145916800))))
+            
+            exp_raw = cookie.get("expirationDate", cookie.get("expires"))
+            if exp_raw is None or float(exp_raw) <= 0:
+                expires = str(default_exp)
+            else:
+                expires = str(int(float(exp_raw)))
+
             name = cookie["name"]
             value = cookie["value"]
             lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
@@ -91,8 +100,11 @@ async def fetch_stealth_cookies() -> str | None:
             page = await context.new_page()
 
             try:
-                from playwright_stealth import stealth_async
-                await stealth_async(page)
+                import playwright_stealth
+                if hasattr(playwright_stealth, "stealth_async"):
+                    await playwright_stealth.stealth_async(page)
+                elif hasattr(playwright_stealth, "stealth"):
+                    await playwright_stealth.stealth(page)
             except Exception as e:
                 print(f"ℹ️ Nota sobre stealth: {e}")
 
