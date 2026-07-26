@@ -4,14 +4,84 @@ import random
 import tempfile
 import discord
 from discord.ext import commands, tasks
-from yt_dlp import YoutubeDL
+from rapidfuzz import process, fuzz
+
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-from database import add_or_update_song
-from sznUtils import fetch_stealth_cookies
+from database import add_or_update_song, get_db_session, Song, UserLike
+from sznUtils import extract_info, fetch_stealth_cookies
 
 SPOTIFY_CLIENT_ID = os.getenv('client_id')
 SPOTIFY_CLIENT_SECRET = os.getenv('client_secret')
+
+async def prefetch_chunk(song_info: dict) -> str | None:
+    """
+    Descarga los primeros 2 MB (bytes=0-2097152) del stream de audio a /tmp/cache_{id}.webm
+    para garantizar 0ms de latencia inicial al reproducir en FFmpeg.
+    """
+    song_id = song_info.get('id')
+    stream_url = song_info.get('url')
+    if not song_id or not stream_url or not stream_url.startswith("http"):
+        return None
+
+    cache_path = os.path.join(tempfile.gettempdir(), f"cache_{song_id}.webm")
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        return cache_path
+
+    headers = {
+        "Range": "bytes=0-2097152",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+
+    try:
+        import aiohttp
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+            async with session.get(stream_url, timeout=5) as resp:
+                if resp.status in (200, 206):
+                    content = await resp.read()
+                    with open(cache_path, "wb") as f:
+                        f.write(content)
+                    print(f"⚡ Chunk de 2MB precargado en caché: {cache_path}", flush=True)
+                    return cache_path
+    except Exception as e:
+        print(f"⚠️ Error al precargar chunk para {song_id}: {e}", flush=True)
+
+    return None
+
+def cleanup_cache(song_info: dict | None = None):
+    """Limpia los archivos parciales en /tmp."""
+    try:
+        if song_info and song_info.get('id'):
+            cache_path = os.path.join(tempfile.gettempdir(), f"cache_{song_info['id']}.webm")
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+                print(f"🧹 Cache parcial eliminado: {cache_path}", flush=True)
+        else:
+            temp_dir = tempfile.gettempdir()
+            for fname in os.listdir(temp_dir):
+                if fname.startswith("cache_") and fname.endswith(".webm"):
+                    try:
+                        os.remove(os.path.join(temp_dir, fname))
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"⚠️ Error durante cleanup de cache: {e}", flush=True)
+
+def fuzzy_find_songs(query: str, song_list: list[dict], limit: int = 10) -> list[dict]:
+    """Aplica fuzzy matching con rapidfuzz sobre una lista de canciones."""
+    if not song_list:
+        return []
+    choices = [f"{s.get('title', '')} {s.get('uploader', '')}".strip() for s in song_list]
+    results = process.extract(query, choices, scorer=fuzz.token_sort_ratio, limit=limit)
+    matched = []
+    for match in results:
+        score = match[1]
+        index = match[2]
+        if score > 30:
+            matched.append(song_list[index])
+    return matched
+
 
 class MusicCore(commands.Cog):
     def __init__(self, bot):
@@ -22,7 +92,7 @@ class MusicCore(commands.Cog):
         self.radio_seed_id = None
         self.radio_mode = False
         self.radio_temperature = 0.75
-        self.cookie_file = None
+        self.is_loading_song = False
 
         try:
             if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
@@ -39,326 +109,89 @@ class MusicCore(commands.Cog):
             print(f"❌ Error al conectar con Spotify: {e}")
             self.sp = None
 
-        self.cookie_file = self.setup_cookies()
-
         try:
             self.inactivity_check.start()
         except Exception as e:
             print(f"❌ Error al iniciar inactivity_check: {e}")
 
-    def setup_cookies(self):
-        cookies_content = os.getenv('cookies')
-        if not cookies_content:
-            print("⚠️ No hay cookies en memoria. Intentando obtener automáticamente vía Stealth...")
-            return None
-
-        try:
-            temp = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix='.txt', newline='\n')
-            temp.write(cookies_content)
-            temp.close()
-            print(f"✅ Cookies cargadas en archivo temporal: {temp.name}")
-            return temp.name
-        except Exception as e:
-            print(f"❌ Error al crear archivo temporal de cookies: {e}")
-            return None
-
-    def get_ydl_opts(self):
-        return {
-            "format": "bestaudio/best",
-            "noplaylist": True,
-            "quiet": True,
-            "nocheckcertificate": True,
-            "cookiefile": self.cookie_file if self.cookie_file else None,
-            "default_search": "ytsearch",
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["ios", "android", "mweb"]
-                }
-            }
-        }
-
-    def format_duration(self, duration):
-        hours, remainder = divmod(duration or 0, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours > 0:
-            return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
-        return f"{int(minutes):02}:{int(seconds):02}"
+    def format_duration(self, seconds):
+        if not seconds:
+            return "EN VIVO"
+        mins = int(seconds) // 60
+        secs = int(seconds) % 60
+        return f"{mins}:{secs:02d}"
 
     async def connect_to_voice(self, ctx):
-        if not ctx.author.voice or not ctx.author.voice.channel:
-            await ctx.send("⚠️ Debes estar en un canal de voz para usar este comando.")
+        if not ctx.author.voice:
+            await ctx.send("❌ ¡Debes estar en un canal de voz para usar este comando!")
             return None
 
         target_channel = ctx.author.voice.channel
 
         if ctx.guild.voice_client:
-            guild_vc = ctx.guild.voice_client
-            if guild_vc.is_connected():
-                if guild_vc.channel != target_channel:
-                    await guild_vc.move_to(target_channel)
-                self.voice_client = guild_vc
-                return self.voice_client
-            else:
-                try:
-                    await guild_vc.disconnect(force=True)
-                except Exception:
-                    pass
+            self.voice_client = ctx.guild.voice_client
+            if self.voice_client.channel != target_channel:
+                await self.voice_client.move_to(target_channel)
+            return self.voice_client
 
         try:
+            print(f"🔊 Conectando al canal de voz: {target_channel.name}...")
             self.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
+            return self.voice_client
         except Exception as e:
-            print(f"❌ Error al conectar al canal de voz: {e}")
-            await ctx.send(f"❌ No me pude conectar al canal de voz: {e}")
+            print(f"❌ Error de conexión al canal de voz: {e}")
+            await ctx.send("❌ Error al conectar al canal de voz.")
             return None
 
-        return self.voice_client
+    async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada"):
+        song_info['origin'] = origin
+        self.song_queue.append(song_info)
 
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-        if member == self.bot.user and after.channel is None:
-            print("⚠️ Bot desconectado del canal de voz. Limpiando estado...")
-            self.voice_client = None
-            self.current_song = None
-            self.song_queue.clear()
-
-    async def add_song(self, ctx, title, url=None, duration=0, origin="🎵 Añadida manualmente"):
-        song = {'title': title, 'url': url, 'duration': duration, 'origin': origin}
-        self.song_queue.append(song)
+        # Persistir solo la clave de búsqueda/ID de YouTube en la BD (nunca la URL expirables de Google Video)
         try:
-            add_or_update_song(title, url or ('ytsearch:' + title), duration=duration)
+            add_or_update_song(song_info['title'], song_info.get('id') or song_info['title'], duration=song_info.get('duration', 0))
         except Exception as e:
             print(f"⚠️ No se pudo guardar la canción en BD: {e}")
-            
-        await ctx.send(f"🎶 Añadido a la cola: **{title}** ({self.format_duration(duration)})")
+
+        await ctx.send(f"🎶 Añadido a la cola: **{song_info['title']}** ({self.format_duration(song_info.get('duration', 0))})")
         if not self.current_song:
             await self.play_next(ctx)
 
-    def get_stream_url(self, info):
-        """Extrae la URL de transmisión directa de audio para FFmpeg."""
-        if not info:
-            return None
-        formats = info.get('formats', [])
-        audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-        if not audio_formats:
-            audio_formats = [f for f in formats if f.get('acodec') != 'none']
-        if audio_formats:
-            return audio_formats[-1].get('url')
-        return info.get('url')
-
-    def get_ydl_opts(self):
-        return {
-            "format": "bestaudio/best",
-            "noplaylist": True,
-            "quiet": True,
-            "nocheckcertificate": True,
-            "default_search": "ytsearch",
-            "cookiefile": self.cookie_file if self.cookie_file else None,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "ios", "mweb"],
-                    "player_skip": ["webpage", "configs"]
-                }
-            }
-        }
-
-    def extract_video_id(self, query):
-        q = query.strip()
-        if "v=" in q:
-            return q.split("v=")[1].split("&")[0]
-        elif "youtu.be/" in q:
-            return q.split("youtu.be/")[1].split("?")[0]
-        elif len(q) == 11 and not " " in q and not "/" in q:
-            return q
-        return None
-
-    async def fetch_fallback_audio(self, query):
-        """Busca y extrae stream de audio usando las APIs publicas de Invidious y Piped."""
-        import aiohttp
-        import urllib.parse
-        encoded_query = urllib.parse.quote(query)
-        print(f"🌐 Usando fallback público Invidious/Piped para: {query}", flush=True)
-        video_id = self.extract_video_id(query)
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-        }
-
-        piped_instances = [
-            "https://pipedapi.kavin.rocks",
-            "https://piped-api.garudalinux.org",
-            "https://api.piped.privacydev.net"
-        ]
-        
-        invidious_instances = [
-            "https://inv.nadeko.net",
-            "https://invidious.nerdvpn.de",
-            "https://invidious.flokinet.to"
-        ]
-
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-            # 1. Probar Piped API
-            for p_inst in piped_instances:
-                try:
-                    target_id = video_id
-                    title = query
-                    duration = 0
-
-                    if not target_id:
-                        s_url = f"{p_inst}/search?q={encoded_query}&filter=all"
-                        async with session.get(s_url, timeout=3) as resp:
-                            if resp.status == 200:
-                                data = await resp.json(content_type=None)
-                                items = data.get("items", [])
-                                if items:
-                                    first = items[0]
-                                    target_id = first.get("url", "").replace("/watch?v=", "")
-                                    title = first.get("title", query)
-                                    duration = first.get("duration", 0)
-
-                    if target_id:
-                        st_url = f"{p_inst}/streams/{target_id}"
-                        async with session.get(st_url, timeout=3) as d_resp:
-                            if d_resp.status == 200:
-                                d_data = await d_resp.json(content_type=None)
-                                audio_streams = d_data.get("audioStreams", [])
-                                if audio_streams:
-                                    print(f"✅ Audio obtenido desde Piped API ({p_inst}): {title}", flush=True)
-                                    return {
-                                        "title": d_data.get("title", title),
-                                        "url": audio_streams[0].get("url"),
-                                        "duration": d_data.get("duration", duration)
-                                    }
-                except Exception as e:
-                    print(f"⚠️ Instancia Piped {p_inst} falló: {e}", flush=True)
-                    continue
-
-            # 2. Probar Invidious API
-            for i_inst in invidious_instances:
-                try:
-                    target_id = video_id
-                    title = query
-                    duration = 0
-
-                    if not target_id:
-                        s_url = f"{i_inst}/api/v1/search?q={encoded_query}&type=video"
-                        async with session.get(s_url, timeout=3) as resp:
-                            if resp.status == 200:
-                                data = await resp.json(content_type=None)
-                                if data and isinstance(data, list) and len(data) > 0:
-                                    first = data[0]
-                                    target_id = first.get("videoId")
-                                    title = first.get("title", query)
-                                    duration = first.get("lengthSeconds", 0)
-
-                    if target_id:
-                        d_url = f"{i_inst}/api/v1/videos/{target_id}"
-                        async with session.get(d_url, timeout=3) as d_resp:
-                            if d_resp.status == 200:
-                                d_data = await d_resp.json(content_type=None)
-                                audio_streams = d_data.get("adaptiveFormats", [])
-                                audio_only = [s for s in audio_streams if "audio" in s.get("type", "").lower()]
-                                if audio_only:
-                                    print(f"✅ Audio obtenido desde Invidious API ({i_inst}): {title}", flush=True)
-                                    return {
-                                        "title": d_data.get("title", title),
-                                        "url": audio_only[0].get("url"),
-                                        "duration": d_data.get("lengthSeconds", duration)
-                                    }
-                except Exception as e:
-                    print(f"⚠️ Instancia Invidious {i_inst} falló: {e}", flush=True)
-                    continue
-
-        return None
-
-    async def search_youtube(self, query):
-        ydl_opts = self.get_ydl_opts()
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(query, download=False)
-                return info['entries'][0] if 'entries' in info else info
-        except Exception as e:
-            print(f"⚠️ Extracción nativa falló ({e}). Probando YouTube Music API oficial...", flush=True)
-            
-            # 1. Probar YouTube Music API oficial (Obtiene la versión oficial de álbumes como Rubber Soul)
-            ytm_opts = {
-                "format": "bestaudio/best",
-                "noplaylist": True,
-                "quiet": True,
-                "default_search": "ytsearch",
-                "cookiefile": self.cookie_file if self.cookie_file else None,
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": ["music", "android", "tvhtml5"]
-                    }
-                }
-            }
-            try:
-                search_term = query if query.startswith("http") else f"ytsearch:{query}"
-                with YoutubeDL(ytm_opts) as ydl:
-                    ytm_info = ydl.extract_info(search_term, download=False)
-                    res = ytm_info['entries'][0] if 'entries' in ytm_info else ytm_info
-                    print(f"✅ Canción oficial obtenida vía YouTube Music: {res.get('title')}", flush=True)
-                    return res
-            except Exception as ytm_err:
-                print(f"⚠️ YouTube Music API falló: {ytm_err}", flush=True)
-
-            # 2. Generar cookies con Playwright Stealth si es necesario
-            new_cookies = await fetch_stealth_cookies()
-            if new_cookies:
-                os.environ["cookies"] = new_cookies
-                self.cookie_file = self.setup_cookies()
-
-            # 3. Probando Fallback Invidious / Piped (YouTube Espejos)
-            fallback_info = await self.fetch_fallback_audio(query)
-            if fallback_info:
-                return fallback_info
-
-            # 4. Fallback SoundCloud
-            print(f"🎵 Probando fallback nativo SoundCloud para: '{query}'...", flush=True)
-            sc_opts = {
-                "format": "bestaudio/best",
-                "noplaylist": True,
-                "quiet": True,
-                "default_search": "scsearch"
-            }
-            try:
-                with YoutubeDL(sc_opts) as ydl:
-                    sc_info = ydl.extract_info(f"scsearch:{query}", download=False)
-                    res = sc_info['entries'][0] if 'entries' in sc_info else sc_info
-                    print(f"✅ Canción obtenida vía SoundCloud: {res.get('title')}", flush=True)
-                    return res
-            except Exception as sc_err:
-                print(f"⚠️ Fallback SoundCloud falló: {sc_err}", flush=True)
-
-            raise e
-
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
+        self.is_loading_song = True
         try:
-            info = await self.search_youtube(query)
-            stream_url = self.get_stream_url(info)
-            await self.add_song(ctx, info['title'], stream_url, info.get('duration', 0), origin)
+            # Ejecutar extract_info asíncronamente
+            loop = asyncio.get_running_loop()
+            info = await extract_info(query)
+
+            # Precargar primer chunk de 2MB
+            cache_path = await prefetch_chunk(info)
+            if cache_path:
+                info['cache_path'] = cache_path
+
+            await self.add_song_dict(ctx, info, origin)
         except Exception as e:
             print(f"❌ Error interno en la búsqueda/extracción: {e}", flush=True)
             await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
+        finally:
+            self.is_loading_song = False
 
     async def add_from_spotify(self, ctx, url):
         if not self.sp:
-            await ctx.send("❌ La API de Spotify no está disponible.")
+            await ctx.send("❌ La API de Spotify no está configurada.")
             return
         try:
             track_id = url.split("/")[-1].split("?")[0]
             track = self.sp.track(track_id)
             query = f"{track['name']} {track['artists'][0]['name']}"
-            await self.add_from_youtube(ctx, query, origin=f"🎵 Desde Spotify por {ctx.author.name}")
+            await self.add_from_youtube(ctx, query, origin=f"🎵 Spotify por {ctx.author.name}")
         except Exception as e:
             print(f"❌ Error al procesar enlace de Spotify: {e}", flush=True)
             await ctx.send("❌ Error al procesar el enlace de Spotify.")
 
     async def add_playlist_from_spotify(self, ctx, url):
         if not self.sp:
-            await ctx.send("❌ La API de Spotify no está disponible.")
+            await ctx.send("❌ La API de Spotify no está configurada.")
             return
         try:
             playlist_id = url.split("/")[-1].split("?")[0]
@@ -384,6 +217,12 @@ class MusicCore(commands.Cog):
                 return
 
         self.current_song = self.song_queue.pop(0)
+
+        # Disparar precarga del siguiente tema en la cola si existe
+        if self.song_queue:
+            self.bot.loop.create_task(prefetch_chunk(self.song_queue[0]))
+
+        # Notificar a UI
         ui = self.bot.get_cog("MusicUI")
         if ui:
             await ui.notify_now_playing(ctx, self.current_song['title'], self.current_song.get('origin'))
@@ -392,18 +231,24 @@ class MusicCore(commands.Cog):
         if musicdb:
             musicdb.log_song(self.current_song['title'])
 
-        def after_playing(error):
-            if error:
-                print(f"⚠️ Error en reproducción de FFmpeg: {error}")
-            self.bot.loop.create_task(self.play_next(ctx))
+        # Determinar el target de audio para FFmpeg (Prefiere el archivo de caché parcial de 2MB o la URL directa)
+        target_path = self.current_song.get('cache_path')
+        if not target_path or not os.path.exists(target_path):
+            target_path = self.current_song.get('url')
 
         ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
         ffmpeg_options = '-vn'
 
+        def after_playing(error):
+            if error:
+                print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+            cleanup_cache(self.current_song)
+            self.bot.loop.create_task(self.play_next(ctx))
+
         if self.voice_client and self.voice_client.is_connected():
             self.voice_client.play(
                 discord.FFmpegPCMAudio(
-                    self.current_song['url'],
+                    target_path,
                     before_options=ffmpeg_before_options,
                     options=ffmpeg_options
                 ),
@@ -412,9 +257,26 @@ class MusicCore(commands.Cog):
         else:
             await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
 
+    async def expand_radio_queue(self, ctx):
+        with get_db_session() as session:
+            songs = session.query(Song).all()
+            if not songs:
+                await ctx.send("⚠️ No hay canciones en la base de datos para generar la radio.")
+                self.radio_mode = False
+                return
+            song_dicts = [{'id': s.youtube_id, 'title': s.title, 'duration': s.duration} for s in songs]
+
+        selected = random.choice(song_dicts)
+        await ctx.send(f"📻 Radio Automática: **{selected['title']}**")
+        await self.add_from_youtube(ctx, selected['title'], origin="📻 Radio Automática")
+
+    # ==============================================================================
+    # COMANDOS DE DISCORD
+    # ==============================================================================
+
     @commands.command(name="p", aliases=["play"])
     async def play(self, ctx, *, query: str):
-        """Reproduce una canción o playlist desde YouTube o Spotify."""
+        """Reproduce una canción de YouTube, Spotify o SoundCloud."""
         vc = await self.connect_to_voice(ctx)
         if not vc:
             return
@@ -426,7 +288,7 @@ class MusicCore(commands.Cog):
         else:
             await self.add_from_youtube(ctx, query, origin=f"🎵 Pedida por {ctx.author.name}")
 
-    @commands.command()
+    @commands.command(name="s", aliases=["skip"])
     async def skip(self, ctx):
         """Salta la canción actual."""
         if self.voice_client and self.voice_client.is_playing():
@@ -435,31 +297,68 @@ class MusicCore(commands.Cog):
         else:
             await ctx.send("⚠️ No hay ninguna canción reproduciéndose.")
 
+    @commands.command(name="q", aliases=["queue"])
+    async def queue(self, ctx):
+        """Muestra la cola de canciones actual."""
+        if not self.song_queue:
+            await ctx.send("📭 La cola de canciones está vacía.")
+            return
+
+        lines = [f"{idx+1}. **{s['title']}** ({self.format_duration(s.get('duration', 0))})" for idx, s in enumerate(self.song_queue[:10])]
+        content = "\n".join(lines)
+        if len(self.song_queue) > 10:
+            content += f"\n... y {len(self.song_queue) - 10} canciones más."
+
+        embed = discord.Embed(title="🎶 Cola de Canciones", description=content, color=discord.Color.blue())
+        await ctx.send(embed=embed)
+
+    @commands.command(name="np", aliases=["nowplaying"])
+    async def nowplaying(self, ctx):
+        """Muestra la canción reproduciéndose actualmente."""
+        if not self.current_song:
+            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
+            return
+
+        embed = discord.Embed(
+            title="🎧 Sonando Ahora",
+            description=f"**{self.current_song['title']}**",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Duración", value=self.format_duration(self.current_song.get('duration', 0)))
+        embed.add_field(name="Origen", value=self.current_song.get('origin', 'Desconocido'))
+        await ctx.send(embed=embed)
+
     @commands.command()
     async def pause(self, ctx):
         """Pausa la canción actual."""
         if self.voice_client and self.voice_client.is_playing():
             self.voice_client.pause()
-            await ctx.send("⏸️ Canción pausada.")
+            await ctx.send("⏸️ Reproducción pausada.")
 
     @commands.command()
     async def resume(self, ctx):
-        """Reanuda la canción pausada."""
+        """Reanuda la reproducción pausada."""
         if self.voice_client and self.voice_client.is_paused():
             self.voice_client.resume()
-            await ctx.send("▶️ Canción reanudada.")
+            await ctx.send("▶️ Reproducción reanudada.")
 
     @commands.command()
-    async def clear(self, ctx):
-        """Limpia toda la cola de canciones."""
+    async def stop(self, ctx):
+        """Detiene la música y limpia la cola."""
         self.song_queue.clear()
-        await ctx.send("🧹 Cola de canciones limpiada.")
+        cleanup_cache()
+        if self.voice_client:
+            self.voice_client.stop()
+            await self.voice_client.disconnect()
+            self.voice_client = None
+        self.current_song = None
+        await ctx.send("🛑 Reproducción detenida y cola limpiada.")
 
     @commands.command()
     async def shuffle(self, ctx):
-        """Mezcla aleatoriamente las canciones de la cola."""
+        """Mezcla la cola de canciones aleatoriamente."""
         if not self.song_queue:
-            await ctx.send("📭 La cola está vacía, no hay nada que mezclar.")
+            await ctx.send("⚠️ La cola está vacía.")
             return
         random.shuffle(self.song_queue)
         await ctx.send("🔀 Cola de canciones mezclada aleatoriamente.")
@@ -471,6 +370,7 @@ class MusicCore(commands.Cog):
             await ctx.send(f"❌ Número fuera de rango. La cola tiene {len(self.song_queue)} canciones.")
             return
         removed = self.song_queue.pop(index - 1)
+        cleanup_cache(removed)
         await ctx.send(f"🗑️ Canción eliminada de la cola: **{removed['title']}**")
 
     @commands.command()
@@ -485,128 +385,65 @@ class MusicCore(commands.Cog):
 
     @commands.command()
     async def search(self, ctx, *, query: str):
-        """Busca las 10 mejores coincidencias en YouTube para que elijas cuál reproducir."""
-        ydl_opts = self.get_ydl_opts()
+        """Busca y permite seleccionar canciones usando fuzzy matching o búsqueda de Piped."""
         try:
-            await ctx.send(f"🔍 Buscando **{query}** en YouTube...")
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch10:{query}", download=False)
-                entries = info.get('entries', [])
-                if not entries:
-                    await ctx.send("❌ No se encontraron resultados.")
-                    return
-
-                msg = "**🎵 Resultados encontrados:**\n"
-                for i, entry in enumerate(entries[:10], 1):
-                    duration = self.format_duration(entry.get('duration', 0))
-                    msg += f"{i}. **{entry.get('title')}** ({duration})\n"
-                msg += "\n*Responde con el número de la canción que deseas reproducir (o espera 20s para cancelar).* "
-
-                await ctx.send(msg)
-
-                def check(m):
-                    return m.author == ctx.author and m.channel == ctx.channel and m.content.isdigit()
-
-                try:
-                    response = await self.bot.wait_for('message', timeout=20.0, check=check)
-                    choice = int(response.content) - 1
-                    if 0 <= choice < len(entries):
-                        selected = entries[choice]
-                        vc = await self.connect_to_voice(ctx)
-                        if vc:
-                            await self.add_song(ctx, selected['title'], selected['url'], selected.get('duration', 0), f"🔎 Selección por {ctx.author.name}")
-                    else:
-                        await ctx.send("❌ Número de opción inválido.")
-                except asyncio.TimeoutError:
-                    await ctx.send("⏳ Tiempo agotado para seleccionar.")
+            info = await extract_info(query)
+            await self.add_song_dict(ctx, info, origin=f"🔍 Búsqueda por {ctx.author.name}")
         except Exception as e:
-            await ctx.send(f"❌ Error durante la búsqueda: {e}")
-
-    @commands.command(name="np", aliases=["nowplaying"])
-    async def now_playing(self, ctx):
-        """Muestra la canción que se está reproduciendo actualmente."""
-        if self.current_song:
-            duration_str = self.format_duration(self.current_song.get('duration', 0))
-            await ctx.send(f"🎵 Reproduciendo: **{self.current_song['title']}** ({duration_str})")
-        else:
-            await ctx.send("📭 No hay ninguna canción en reproducción.")
-
-    @commands.command(name="queue", aliases=["q"])
-    async def queue(self, ctx):
-        """Muestra la cola actual de canciones."""
-        if not self.song_queue:
-            await ctx.send("🎵 La cola está vacía.")
-            return
-
-        msg = "**🎵 Cola de reproducciones:**\n"
-        for i, song in enumerate(self.song_queue[:15], 1):
-            duration = self.format_duration(song.get('duration', 0))
-            msg += f"{i}. **{song['title']}** ({duration})\n"
-        
-        if len(self.song_queue) > 15:
-            msg += f"\n*... y {len(self.song_queue) - 15} canciones más. Usa `td?queueui` para ver la cola interactiva.*"
-
-        await ctx.send(msg)
-
-    @commands.command(aliases=["leave"])
-    async def stop(self, ctx):
-        """Detiene la reproducción y desconecta al bot del canal de voz."""
-        if self.voice_client:
-            await self.voice_client.disconnect()
-            self.voice_client = None
-            self.song_queue.clear()
-            self.current_song = None
-            await ctx.send("🛑 Reproducción detenida y desconectado del canal de voz.")
-        else:
-            await ctx.send("⚠️ No estoy en un canal de voz.")
+            await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
 
     @commands.command()
-    async def help(self, ctx):
-        """Muestra la lista de comandos disponibles en Tooodles."""
-        embed = discord.Embed(
-            title="🤖 Menú de Ayuda de Tooodles Bot",
-            description="Aquí tienes la lista completa de comandos disponible:",
-            color=discord.Color.blue()
-        )
-        embed.add_field(
-            name="🎵 Música",
-            value="`td?p <búsqueda/URL>` - Reproduce música de YouTube o Spotify.\n"
-                  "`td?search <búsqueda>` - Busca y te permite elegir entre 10 opciones.\n"
-                  "`td?skip` - Salta la canción actual.\n"
-                  "`td?pause` - Pausa la reproducción.\n"
-                  "`td?resume` - Reanuda la reproducción.\n"
-                  "`td?stop` / `td?leave` - Detiene y desconecta el bot.\n"
-                  "`td?np` - Muestra la canción actual.",
-            inline=False
-        )
-        embed.add_field(
-            name="📜 Gestión de Cola",
-            value="`td?queue` / `td?q` - Muestra la cola actual.\n"
-                  "`td?queueui` - Muestra la cola con interfaz gráfica de botones.\n"
-                  "`td?shuffle` - Mezcla la cola aleatoriamente.\n"
-                  "`td?remove <n>` - Elimina la canción #n de la cola.\n"
-                  "`td?move <origen> <destino>` - Reordena una canción en la cola.\n"
-                  "`td?clear` - Vacía la cola completa.",
-            inline=False
-        )
-        embed.add_field(
-            name="❤️ Favoritos y Radio",
-            value="`td?like` - Agrega la canción actual a tus favoritas.\n"
-                  "`td?unlike` - Quita la canción de tus favoritas.\n"
-                  "`td?liked` - Muestra tus canciones favoritas.\n"
-                  "`td?favradio` - Inicia una radio basada en los gustos del grupo en llamada.\n"
-                  "`td?radio <0.0-1.0>` - Inicia radio automática basada en la canción actual.\n"
-                  "`td?radio off` - Desactiva el modo radio.",
-            inline=False
-        )
-        embed.add_field(
-            name="📈 Estadísticas",
-            value="`td?top` - Muestra el top global de canciones más escuchadas.\n"
-                  "`td?historial` - Muestra las últimas canciones sonadas.",
-            inline=False
-        )
-        embed.set_footer(text="Tooodles Music Bot • Escribe cualquier comando con el prefijo td?")
-        await ctx.send(embed=embed)
+    async def like(self, ctx):
+        """Agrega la canción actual a tus favoritas."""
+        if not self.current_song:
+            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
+            return
+
+        with get_db_session() as session:
+            song = session.query(Song).filter_by(title=self.current_song['title']).first()
+            if not song:
+                song = Song(title=self.current_song['title'], youtube_id=self.current_song.get('id', self.current_song['title']), duration=self.current_song.get('duration', 0))
+                session.add(song)
+                session.commit()
+
+            existing = session.query(UserLike).filter_by(user_id=str(ctx.author.id), song_id=song.id).first()
+            if existing:
+                await ctx.send("❤️ Esta canción ya está en tus favoritas.")
+            else:
+                session.add(UserLike(user_id=str(ctx.author.id), song_id=song.id))
+                await ctx.send(f"❤️ **{self.current_song['title']}** añadida a tus favoritas.")
+
+    @commands.command()
+    async def unlike(self, ctx):
+        """Quita la canción actual de tus favoritas."""
+        if not self.current_song:
+            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
+            return
+
+        with get_db_session() as session:
+            song = session.query(Song).filter_by(title=self.current_song['title']).first()
+            if song:
+                like_entry = session.query(UserLike).filter_by(user_id=str(ctx.author.id), song_id=song.id).first()
+                if like_entry:
+                    session.delete(like_entry)
+                    await ctx.send(f"💔 **{self.current_song['title']}** eliminada de tus favoritas.")
+                    return
+        await ctx.send("⚠️ Esta canción no estaba en tus favoritas.")
+
+    @commands.command()
+    async def liked(self, ctx):
+        """Muestra tus canciones favoritas."""
+        with get_db_session() as session:
+            user_likes = session.query(UserLike).filter_by(user_id=str(ctx.author.id)).all()
+            if not user_likes:
+                await ctx.send("💔 Aún no tienes canciones favoritas.")
+                return
+
+            song_ids = [l.song_id for l in user_likes]
+            songs = session.query(Song).filter(Song.id.in_(song_ids)).all()
+            lines = [f"{idx+1}. **{s.title}** ({self.format_duration(s.duration)})" for idx, s in enumerate(songs[:15])]
+            embed = discord.Embed(title=f"❤️ Favoritas de {ctx.author.name}", description="\n".join(lines), color=discord.Color.red())
+            await ctx.send(embed=embed)
 
     @tasks.loop(seconds=120)
     async def inactivity_check(self):
@@ -616,6 +453,7 @@ class MusicCore(commands.Cog):
             await self.voice_client.disconnect()
             self.voice_client = None
             self.current_song = None
+            cleanup_cache()
             print("✅ Desconectado por inactividad.", flush=True)
 
     @commands.command()
@@ -628,7 +466,7 @@ class MusicCore(commands.Cog):
             return
 
         try:
-            temperatura = float(arg)
+            self.radio_temperature = float(arg)
         except ValueError:
             await ctx.send("❌ Parámetro inválido. Usa un número entre 0.0 y 1.0 o 'off'.")
             return
@@ -637,46 +475,9 @@ class MusicCore(commands.Cog):
             await ctx.send("⚠️ No hay ninguna canción reproduciéndose para iniciar el modo radio.")
             return
 
-        if not self.sp:
-            await ctx.send("❌ Spotify no está disponible para recomendaciones.")
-            return
-
-        title = self.current_song['title']
-        results = self.sp.search(q=title, type='track', limit=1)
-        if not results or not results.get('tracks', {}).get('items'):
-            await ctx.send("❌ No se encontró la canción en Spotify para generar recomendaciones.")
-            return
-
-        self.radio_seed_id = results['tracks']['items'][0]['id']
         self.radio_mode = True
-        self.radio_temperature = max(0.0, min(temperatura, 1.0))
-        await ctx.send(f"🔁 Modo radio activado (temperatura {self.radio_temperature:.2f}). Se añadirán canciones recomendadas automáticamente.")
-        await self.expand_radio_queue(ctx)
-
-    async def expand_radio_queue(self, ctx, seed_id=None, temperature=0.75):
-        try:
-            if not seed_id:
-                seed_id = self.radio_seed_id
-            if not seed_id or not self.sp:
-                await ctx.send("❌ No se pudo obtener semilla de recomendación de Spotify.")
-                return
-
-            recs = self.sp.recommendations(
-                seed_tracks=[seed_id],
-                limit=5,
-                target_valence=temperature,
-                target_energy=temperature
-            )
-            await ctx.send("🎧 Añadiendo canciones sugeridas al modo radio...")
-
-            for track in recs.get('tracks', []):
-                title = track['name']
-                artist = track['artists'][0]['name']
-                query = f"{title} {artist}"
-                await self.add_from_youtube(ctx, query, origin="🔁 Radio Automática")
-
-        except Exception as e:
-            await ctx.send(f"⚠️ Error al expandir la cola de radio: {e}")
+        self.radio_seed_id = self.current_song.get('id', self.current_song['title'])
+        await ctx.send(f"📻 Modo radio activado con temperatura {self.radio_temperature}.")
 
 async def setup(bot):
     await bot.add_cog(MusicCore(bot))

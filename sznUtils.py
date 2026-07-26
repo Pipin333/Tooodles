@@ -1,7 +1,10 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
+import time
+import urllib.parse
 from database import get_db_session, AppConfig
 
 FERNET_KEY = os.getenv("FERNET_KEY")
@@ -39,8 +42,6 @@ def load_config(key: str) -> str | None:
         print(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
     return None
 
-import time
-
 def json_to_netscape(cookies_json: list | str) -> str:
     """Convierte una lista o string JSON de cookies a formato Netscape."""
     try:
@@ -72,13 +73,11 @@ def json_to_netscape(cookies_json: list | str) -> str:
         raise ValueError(f"Error al convertir cookies a Netscape: {e}")
 
 async def fetch_stealth_cookies() -> str | None:
-    """
-    Utiliza Playwright + playwright_stealth para obtener cookies frescas de YouTube en segundo plano.
-    """
+    """Utiliza Playwright Stealth para obtener cookies frescas de YouTube en segundo plano."""
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        print("ℹ️ Playwright no está instalado. Instala 'playwright' y 'playwright-stealth'.")
+        print("ℹ️ Playwright no está instalado.")
         return None
 
     try:
@@ -108,11 +107,9 @@ async def fetch_stealth_cookies() -> str | None:
             except Exception as e:
                 print(f"ℹ️ Nota sobre stealth: {e}")
 
-            # Visitar portada de YouTube
             await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2)
 
-            # Intentar hacer clic en el botón de aceptar consentimiento si aparece
             try:
                 btn = page.locator("button[aria-label*='Accept'], button[aria-label*='Aceptar']").first
                 if await btn.is_visible(timeout=3000):
@@ -121,7 +118,6 @@ async def fetch_stealth_cookies() -> str | None:
             except Exception:
                 pass
 
-            # Visitar una página de video para recibir las cookies de reproducción (PREF / VISITOR_INFO1_LIVE)
             try:
                 await page.goto("https://www.youtube.com/watch?v=dQw4w9WgWgQ", wait_until="domcontentloaded", timeout=15000)
                 await asyncio.sleep(2)
@@ -140,3 +136,207 @@ async def fetch_stealth_cookies() -> str | None:
         print(f"❌ Error al obtener cookies stealth con Playwright: {e}")
     
     return None
+
+# ==============================================================================
+# PIPED REST API EXTRACTION LAYER (0% YouTube Bot Blocks, Lightweight & Fast)
+# ==============================================================================
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.yt",
+    "https://piped-api.garudalinux.org",
+    "https://pipedapi.tokhmi.xyz",
+    "https://pipedapi.privacydev.net",
+    "https://api.piped.privacydev.net"
+]
+
+def extract_youtube_id(query: str) -> str | None:
+    """Extrae un Video ID de YouTube de 11 caracteres de URLs o texto."""
+    if not query:
+        return None
+    q = query.strip()
+    if len(q) == 11 and re.match(r'^[a-zA-Z0-9_-]{11}$', q):
+        return q
+    match = re.search(r'(?:v=|\/([0-9A-Za-z_-]{11})(?:[\?&]|$)|youtu\.be\/|shorts\/|embed\/)([a-zA-Z0-9_-]{11})', q)
+    if match:
+        return match.group(1) or match.group(2)
+    return None
+
+async def fetch_piped_stream(video_id: str) -> dict | None:
+    """Consulta la API pública de Piped `/streams/{id}` para obtener el stream directo de audio y metadata."""
+    import aiohttp
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    connector = aiohttp.TCPConnector(ssl=False)
+
+    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+        for instance in PIPED_INSTANCES:
+            try:
+                url = f"{instance}/streams/{video_id}"
+                async with session.get(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        audio_streams = data.get("audioStreams", [])
+                        if audio_streams:
+                            # Elegir el formato de audio con mejor calidad/bitrate
+                            best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
+                            title = data.get("title", f"Video {video_id}")
+                            duration = data.get("duration", 0)
+                            uploader = data.get("uploader", "YouTube")
+                            thumbnail = data.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                            
+                            print(f"✅ Stream resuelto vía Piped API ({instance}): {title}", flush=True)
+                            return {
+                                'id': video_id,
+                                'title': title,
+                                'url': best_audio['url'],
+                                'duration': duration,
+                                'uploader': uploader,
+                                'thumbnail': thumbnail
+                            }
+            except Exception as e:
+                print(f"⚠️ Instancia Piped ({instance}) no disponible para stream: {e}", flush=True)
+                continue
+
+    return None
+
+async def fetch_piped_search(query: str) -> dict | None:
+    """Busca en Piped `/search?q={query}` para resolver el top match e invocar `/streams/{id}`."""
+    import aiohttp
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    connector = aiohttp.TCPConnector(ssl=False)
+    encoded_query = urllib.parse.quote(query)
+
+    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+        for instance in PIPED_INSTANCES:
+            try:
+                url = f"{instance}/search?q={encoded_query}&filter=all"
+                async with session.get(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        items = data.get("items", [])
+                        for item in items:
+                            item_url = item.get("url", "")
+                            video_id = extract_youtube_id(item_url) or item.get("id") or item.get("videoId")
+                            if video_id:
+                                stream_info = await fetch_piped_stream(video_id)
+                                if stream_info:
+                                    return stream_info
+            except Exception as e:
+                print(f"⚠️ Instancia Piped ({instance}) no disponible para búsqueda: {e}", flush=True)
+                continue
+
+    return None
+
+def extract_flat_metadata(query: str) -> dict | None:
+    """Utiliza yt-dlp únicamente con extract_flat=True para extraer metadatos sin descargar audio ni scrapear HTML."""
+    try:
+        from yt_dlp import YoutubeDL
+        ydl_opts = {
+            "extract_flat": True,
+            "skip_download": True,
+            "quiet": True,
+            "noplaylist": True,
+            "nocheckcertificate": True
+        }
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            if info:
+                entry = info['entries'][0] if 'entries' in info and info['entries'] else info
+                return {
+                    'title': entry.get('title', query),
+                    'uploader': entry.get('uploader') or entry.get('artist') or 'Unknown Artist',
+                    'id': entry.get('id'),
+                    'duration': entry.get('duration', 0)
+                }
+    except Exception as e:
+        print(f"⚠️ Flat metadata extraction note: {e}", flush=True)
+    return None
+
+async def extract_info(query: str) -> dict:
+    """
+    Función principal unificada de extracción que soporta los 3 flujos:
+    1. Direct YouTube link / Video ID -> Piped /streams/{id}
+    2. Search query or external link (Spotify/SoundCloud) -> Metadata + Piped /search
+    3. Direct Media File (.mp3 / raw URL) -> Direct media stream fallback
+    
+    Retorna un diccionario unificado:
+    {'id': str, 'title': str, 'url': str, 'duration': int, 'uploader': str, 'thumbnail': str}
+    """
+    if not query:
+        raise ValueError("Consulta vacía.")
+
+    q = query.strip()
+
+    # FLUJO 1: Enlace directo o ID de YouTube
+    video_id = extract_youtube_id(q)
+    if video_id:
+        info = await fetch_piped_stream(video_id)
+        if info:
+            return info
+
+    # FLUJO 2: Búsqueda de texto o enlace externo (Spotify / SoundCloud)
+    # Intentar búsqueda directa en Piped
+    clean_query = q
+    if "spotify.com/track" in q:
+        flat_meta = extract_flat_metadata(q)
+        if flat_meta and flat_meta.get('title'):
+            clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}"
+    elif "soundcloud.com" in q:
+        flat_meta = extract_flat_metadata(q)
+        if flat_meta and flat_meta.get('title'):
+            clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}"
+
+    search_info = await fetch_piped_search(clean_query)
+    if search_info:
+        return search_info
+
+    # Si la búsqueda limpia falló, intentar extraer flat_metadata y reintentar Piped
+    flat_meta = extract_flat_metadata(q)
+    if flat_meta and flat_meta.get('title'):
+        title_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}".strip()
+        search_info = await fetch_piped_search(title_query)
+        if search_info:
+            return search_info
+
+    # FLUJO 3: Fallback a archivo directo o stream media (.mp3, .flac, .ogg, etc.)
+    if q.startswith("http://") or q.startswith("https://"):
+        try:
+            from yt_dlp import YoutubeDL
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "noplaylist": True,
+                "quiet": True,
+                "nocheckcertificate": True
+            }
+            def _yt_direct():
+                with YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(q, download=False)
+
+            info = await asyncio.to_thread(_yt_direct)
+            if info:
+                entry = info['entries'][0] if 'entries' in info and info['entries'] else info
+                stream_url = entry.get('url')
+                formats = entry.get('formats', [])
+                if not stream_url and formats:
+                    audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                    if audio_formats:
+                        stream_url = audio_formats[-1]['url']
+
+                return {
+                    'id': entry.get('id', 'direct'),
+                    'title': entry.get('title', 'Direct Stream'),
+                    'url': stream_url or q,
+                    'duration': entry.get('duration', 0),
+                    'uploader': entry.get('uploader', 'Direct Stream'),
+                    'thumbnail': entry.get('thumbnail', '')
+                }
+        except Exception as fallback_err:
+            print(f"⚠️ Fallback directo falló: {fallback_err}", flush=True)
+
+    raise RuntimeError(f"No se pudo resolver el stream de audio para: '{query}'")
