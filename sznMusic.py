@@ -392,58 +392,7 @@ class MusicCore(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
 
-    @commands.command()
-    async def like(self, ctx):
-        """Agrega la canción actual a tus favoritas."""
-        if not self.current_song:
-            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
-            return
 
-        with get_db_session() as session:
-            song = session.query(Song).filter_by(title=self.current_song['title']).first()
-            if not song:
-                song = Song(title=self.current_song['title'], youtube_id=self.current_song.get('id', self.current_song['title']), duration=self.current_song.get('duration', 0))
-                session.add(song)
-                session.commit()
-
-            existing = session.query(UserLike).filter_by(user_id=str(ctx.author.id), song_id=song.id).first()
-            if existing:
-                await ctx.send("❤️ Esta canción ya está en tus favoritas.")
-            else:
-                session.add(UserLike(user_id=str(ctx.author.id), song_id=song.id))
-                await ctx.send(f"❤️ **{self.current_song['title']}** añadida a tus favoritas.")
-
-    @commands.command()
-    async def unlike(self, ctx):
-        """Quita la canción actual de tus favoritas."""
-        if not self.current_song:
-            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
-            return
-
-        with get_db_session() as session:
-            song = session.query(Song).filter_by(title=self.current_song['title']).first()
-            if song:
-                like_entry = session.query(UserLike).filter_by(user_id=str(ctx.author.id), song_id=song.id).first()
-                if like_entry:
-                    session.delete(like_entry)
-                    await ctx.send(f"💔 **{self.current_song['title']}** eliminada de tus favoritas.")
-                    return
-        await ctx.send("⚠️ Esta canción no estaba en tus favoritas.")
-
-    @commands.command()
-    async def liked(self, ctx):
-        """Muestra tus canciones favoritas."""
-        with get_db_session() as session:
-            user_likes = session.query(UserLike).filter_by(user_id=str(ctx.author.id)).all()
-            if not user_likes:
-                await ctx.send("💔 Aún no tienes canciones favoritas.")
-                return
-
-            song_ids = [l.song_id for l in user_likes]
-            songs = session.query(Song).filter(Song.id.in_(song_ids)).all()
-            lines = [f"{idx+1}. **{s.title}** ({self.format_duration(s.duration)})" for idx, s in enumerate(songs[:15])]
-            embed = discord.Embed(title=f"❤️ Favoritas de {ctx.author.name}", description="\n".join(lines), color=discord.Color.red())
-            await ctx.send(embed=embed)
 
     @tasks.loop(seconds=120)
     async def inactivity_check(self):
