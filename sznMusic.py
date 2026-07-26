@@ -67,11 +67,12 @@ class MusicCore(commands.Cog):
             "format": "bestaudio/best",
             "noplaylist": True,
             "quiet": True,
+            "nocheckcertificate": True,
             "cookiefile": self.cookie_file if self.cookie_file else None,
             "default_search": "ytsearch",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["mweb", "ios", "android", "tv"]
+                    "player_client": ["ios", "android", "mweb"]
                 }
             }
         }
@@ -153,13 +154,6 @@ class MusicCore(commands.Cog):
             raise e
 
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
-        musicdb = getattr(self.bot, "musicdb", None)
-        match = musicdb.find_similar_song(query) if musicdb else None
-        
-        if match:
-            await self.add_song(ctx, match.title, match.url, match.duration, origin)
-            return
-
         try:
             info = await self.search_youtube(query)
             await self.add_song(ctx, info['title'], info['url'], info.get('duration', 0), origin)
