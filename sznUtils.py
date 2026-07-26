@@ -142,8 +142,8 @@ async def fetch_stealth_cookies() -> str | None:
 # ==============================================================================
 
 def get_cookie_file_path() -> str | None:
-    cookies_content = os.getenv('cookies') or load_config('cookies')
-    if not cookies_content:
+    cookies_content = load_config('cookies') or os.getenv('cookies')
+    if not cookies_content or len(cookies_content.strip()) < 50:
         return None
     try:
         temp = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix='.txt', newline='\n')
@@ -156,9 +156,7 @@ def get_cookie_file_path() -> str | None:
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.col237.dev",
-    "https://pipedapi.drgns.space",
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de"
+    "https://pipedapi.drgns.space"
 ]
 
 def extract_youtube_id(query: str) -> str | None:
@@ -208,13 +206,47 @@ async def fetch_piped_stream(video_id: str) -> dict | None:
                                 'thumbnail': thumbnail
                             }
             except Exception as e:
-                print(f"⚠️ Instancia ({instance}) no disponible para stream: {e}", flush=True)
+                print(f"⚠️ Instancia Piped ({instance}) no disponible para stream: {e}", flush=True)
                 continue
 
     return None
 
+async def fetch_invidious_stream(video_id: str, session) -> dict | None:
+    invidious_instances = [
+        "https://inv.nadeko.net",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.flokinet.to"
+    ]
+    for instance in invidious_instances:
+        try:
+            base_url = instance.rstrip("/")
+            url = f"{base_url}/api/v1/videos/{video_id}"
+            async with session.get(url, timeout=4) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    adaptive_formats = data.get("adaptiveFormats", [])
+                    audio_streams = [s for s in adaptive_formats if "audio" in s.get("type", "").lower()]
+                    if audio_streams:
+                        best_audio = sorted(audio_streams, key=lambda x: int(x.get("bitrate", 0) or 0), reverse=True)[0]
+                        title = data.get("title", f"Video {video_id}")
+                        duration = data.get("lengthSeconds", 0)
+                        uploader = data.get("author", "YouTube")
+                        thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                        print(f"✅ Stream resuelto vía Invidious API ({base_url}): {title}", flush=True)
+                        return {
+                            'id': video_id,
+                            'title': title,
+                            'url': best_audio['url'],
+                            'duration': duration,
+                            'uploader': uploader,
+                            'thumbnail': thumbnail
+                        }
+        except Exception:
+            continue
+    return None
+
 async def fetch_piped_search(query: str) -> dict | None:
-    """Busca en Piped `/search?q={query}` para resolver el top match e invocar `/streams/{id}`."""
+    """Busca en Piped e Invidious API utilizando sus esquemas y endpoints nativos."""
     import aiohttp
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -223,12 +255,19 @@ async def fetch_piped_search(query: str) -> dict | None:
     connector = aiohttp.TCPConnector(ssl=False)
     encoded_query = urllib.parse.quote(query)
 
+    invidious_instances = [
+        "https://inv.nadeko.net",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.flokinet.to"
+    ]
+
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+        # 1. Búsqueda Piped API (/search?q=...)
         for instance in PIPED_INSTANCES:
             try:
                 base_url = instance.rstrip("/")
                 url = f"{base_url}/search?q={encoded_query}&filter=all"
-                async with session.get(url, timeout=5) as resp:
+                async with session.get(url, timeout=4) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
                         items = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
@@ -240,8 +279,25 @@ async def fetch_piped_search(query: str) -> dict | None:
                                 if stream_info:
                                     return stream_info
             except Exception as e:
-                print(f"⚠️ Instancia ({instance}) no disponible para búsqueda: {e}", flush=True)
-                continue
+                print(f"⚠️ Instancia Piped ({instance}) no disponible para búsqueda: {e}", flush=True)
+
+        # 2. Búsqueda Invidious API (/api/v1/search?q=...)
+        for instance in invidious_instances:
+            try:
+                base_url = instance.rstrip("/")
+                url = f"{base_url}/api/v1/search?q={encoded_query}&type=video"
+                async with session.get(url, timeout=4) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if isinstance(data, list) and len(data) > 0:
+                            for item in data:
+                                video_id = item.get("videoId")
+                                if video_id:
+                                    stream_info = await fetch_invidious_stream(video_id, session)
+                                    if stream_info:
+                                        return stream_info
+            except Exception as e:
+                print(f"⚠️ Instancia Invidious ({instance}) no disponible para búsqueda: {e}", flush=True)
 
     return None
 
