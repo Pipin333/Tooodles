@@ -172,28 +172,78 @@ class MusicCore(commands.Cog):
         return None
 
     async def fetch_fallback_audio(self, query):
-        """Busca y extrae stream de audio usando la API publica de Invidious/Piped cuando YouTube bloquea IPs de Datacenter."""
+        """Busca y extrae stream de audio usando las APIs publicas de Invidious y Piped."""
         import aiohttp
+        import urllib.parse
+        encoded_query = urllib.parse.quote(query)
         print(f"🌐 Usando fallback público Invidious/Piped para: {query}", flush=True)
         video_id = self.extract_video_id(query)
         
-        instances = [
-            "https://invidious.nerdvpn.de",
-            "https://inv.tux.pizza",
-            "https://invidious.drgns.space",
-            "https://pipedapi.kavin.rocks"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
+
+        piped_instances = [
+            "https://pipedapi.kavin.rocks",
+            "https://api.piped.video",
+            "https://pipedapi.tokhmi.xyz"
         ]
         
-        async with aiohttp.ClientSession() as session:
-            for instance in instances:
+        invidious_instances = [
+            "https://invidious.privacydev.net",
+            "https://inv.tux.pizza",
+            "https://invidious.drgns.space",
+            "https://invidious.nerdvpn.de"
+        ]
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # 1. Probar Piped API
+            for p_inst in piped_instances:
                 try:
                     target_id = video_id
                     title = query
                     duration = 0
 
                     if not target_id:
-                        search_url = f"{instance}/api/v1/search?q={query}&type=video"
-                        async with session.get(search_url, timeout=5) as resp:
+                        s_url = f"{p_inst}/search?q={encoded_query}&filter=all"
+                        async with session.get(s_url, timeout=4) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                items = data.get("items", [])
+                                if items:
+                                    first = items[0]
+                                    target_id = first.get("url", "").replace("/watch?v=", "")
+                                    title = first.get("title", query)
+                                    duration = first.get("duration", 0)
+
+                    if target_id:
+                        st_url = f"{p_inst}/streams/{target_id}"
+                        async with session.get(st_url, timeout=4) as d_resp:
+                            if d_resp.status == 200:
+                                d_data = await d_resp.json()
+                                audio_streams = d_data.get("audioStreams", [])
+                                if audio_streams:
+                                    print(f"✅ Audio obtenido desde Piped API ({p_inst}): {title}", flush=True)
+                                    return {
+                                        "title": d_data.get("title", title),
+                                        "url": audio_streams[0].get("url"),
+                                        "duration": d_data.get("duration", duration)
+                                    }
+                except Exception as e:
+                    print(f"⚠️ Instancia Piped {p_inst} falló: {e}", flush=True)
+                    continue
+
+            # 2. Probar Invidious API
+            for i_inst in invidious_instances:
+                try:
+                    target_id = video_id
+                    title = query
+                    duration = 0
+
+                    if not target_id:
+                        s_url = f"{i_inst}/api/v1/search?q={encoded_query}&type=video"
+                        async with session.get(s_url, timeout=4) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 if data and isinstance(data, list) and len(data) > 0:
@@ -203,24 +253,21 @@ class MusicCore(commands.Cog):
                                     duration = first.get("lengthSeconds", 0)
 
                     if target_id:
-                        detail_url = f"{instance}/api/v1/videos/{target_id}"
-                        async with session.get(detail_url, timeout=5) as d_resp:
+                        d_url = f"{i_inst}/api/v1/videos/{target_id}"
+                        async with session.get(d_url, timeout=4) as d_resp:
                             if d_resp.status == 200:
                                 d_data = await d_resp.json()
-                                if not title or title == query:
-                                    title = d_data.get("title", query)
-                                duration = d_data.get("lengthSeconds", duration)
                                 audio_streams = d_data.get("adaptiveFormats", [])
                                 audio_only = [s for s in audio_streams if "audio" in s.get("type", "").lower()]
                                 if audio_only:
-                                    print(f"✅ Audio obtenido desde instancia alternativa ({instance}): {title}", flush=True)
+                                    print(f"✅ Audio obtenido desde Invidious API ({i_inst}): {title}", flush=True)
                                     return {
-                                        "title": title,
+                                        "title": d_data.get("title", title),
                                         "url": audio_only[0].get("url"),
-                                        "duration": duration
+                                        "duration": d_data.get("lengthSeconds", duration)
                                     }
                 except Exception as e:
-                    print(f"⚠️ Instancia {instance} no respondió: {e}", flush=True)
+                    print(f"⚠️ Instancia Invidious {i_inst} falló: {e}", flush=True)
                     continue
 
         return None
