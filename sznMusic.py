@@ -192,9 +192,8 @@ class MusicCore(commands.Cog):
         
         invidious_instances = [
             "https://inv.nadeko.net",
-            "https://invidious.no-jonas.de",
-            "https://invidious.io.lol",
-            "https://invidious.nerdvpn.de"
+            "https://invidious.nerdvpn.de",
+            "https://invidious.flokinet.to"
         ]
 
         connector = aiohttp.TCPConnector(ssl=False)
@@ -208,9 +207,9 @@ class MusicCore(commands.Cog):
 
                     if not target_id:
                         s_url = f"{p_inst}/search?q={encoded_query}&filter=all"
-                        async with session.get(s_url, timeout=5) as resp:
+                        async with session.get(s_url, timeout=3) as resp:
                             if resp.status == 200:
-                                data = await resp.json()
+                                data = await resp.json(content_type=None)
                                 items = data.get("items", [])
                                 if items:
                                     first = items[0]
@@ -220,9 +219,9 @@ class MusicCore(commands.Cog):
 
                     if target_id:
                         st_url = f"{p_inst}/streams/{target_id}"
-                        async with session.get(st_url, timeout=5) as d_resp:
+                        async with session.get(st_url, timeout=3) as d_resp:
                             if d_resp.status == 200:
-                                d_data = await d_resp.json()
+                                d_data = await d_resp.json(content_type=None)
                                 audio_streams = d_data.get("audioStreams", [])
                                 if audio_streams:
                                     print(f"✅ Audio obtenido desde Piped API ({p_inst}): {title}", flush=True)
@@ -244,9 +243,9 @@ class MusicCore(commands.Cog):
 
                     if not target_id:
                         s_url = f"{i_inst}/api/v1/search?q={encoded_query}&type=video"
-                        async with session.get(s_url, timeout=5) as resp:
+                        async with session.get(s_url, timeout=3) as resp:
                             if resp.status == 200:
-                                data = await resp.json()
+                                data = await resp.json(content_type=None)
                                 if data and isinstance(data, list) and len(data) > 0:
                                     first = data[0]
                                     target_id = first.get("videoId")
@@ -255,9 +254,9 @@ class MusicCore(commands.Cog):
 
                     if target_id:
                         d_url = f"{i_inst}/api/v1/videos/{target_id}"
-                        async with session.get(d_url, timeout=5) as d_resp:
+                        async with session.get(d_url, timeout=3) as d_resp:
                             if d_resp.status == 200:
-                                d_data = await d_resp.json()
+                                d_data = await d_resp.json(content_type=None)
                                 audio_streams = d_data.get("adaptiveFormats", [])
                                 audio_only = [s for s in audio_streams if "audio" in s.get("type", "").lower()]
                                 if audio_only:
@@ -573,13 +572,15 @@ class MusicCore(commands.Cog):
         embed.set_footer(text="Tooodles Music Bot • Escribe cualquier comando con el prefijo td?")
         await ctx.send(embed=embed)
 
-    @tasks.loop(seconds=60)
+    @tasks.loop(seconds=120)
     async def inactivity_check(self):
-        if self.voice_client and not self.voice_client.is_playing() and not self.song_queue:
+        if getattr(self, 'is_loading_song', False):
+            return
+        if self.voice_client and not self.voice_client.is_playing() and not getattr(self.voice_client, 'is_paused', lambda: False)() and not self.song_queue:
             await self.voice_client.disconnect()
             self.voice_client = None
             self.current_song = None
-            print("✅ Desconectado por inactividad.")
+            print("✅ Desconectado por inactividad.", flush=True)
 
     @commands.command()
     async def radio(self, ctx, *, arg: str = "0.75"):
