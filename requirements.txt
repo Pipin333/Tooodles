@@ -8,3 +8,5 @@ sqlalchemy
 cryptography
 rapidfuzz
 davey
+playwright
+playwright-stealth
