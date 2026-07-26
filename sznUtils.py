@@ -143,11 +143,10 @@ async def fetch_stealth_cookies() -> str | None:
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://api.piped.yt",
-    "https://piped-api.garudalinux.org",
-    "https://pipedapi.tokhmi.xyz",
-    "https://pipedapi.privacydev.net",
-    "https://api.piped.privacydev.net"
+    "https://pipedapi.adminforge.de",
+    "https://pipedapi.aston.cx",
+    "https://pipedapi.col237.dev",
+    "https://pipedapi.drgns.space"
 ]
 
 def extract_youtube_id(query: str) -> str | None:
@@ -237,6 +236,7 @@ def extract_flat_metadata(query: str) -> dict | None:
     """Utiliza yt-dlp únicamente con extract_flat=True para extraer metadatos sin descargar audio ni scrapear HTML."""
     try:
         from yt_dlp import YoutubeDL
+        search_target = query if query.startswith("http") else f"ytsearch:{query}"
         ydl_opts = {
             "extract_flat": True,
             "skip_download": True,
@@ -245,7 +245,7 @@ def extract_flat_metadata(query: str) -> dict | None:
             "nocheckcertificate": True
         }
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(query, download=False)
+            info = ydl.extract_info(search_target, download=False)
             if info:
                 entry = info['entries'][0] if 'entries' in info and info['entries'] else info
                 return {
@@ -281,16 +281,11 @@ async def extract_info(query: str) -> dict:
             return info
 
     # FLUJO 2: Búsqueda de texto o enlace externo (Spotify / SoundCloud)
-    # Intentar búsqueda directa en Piped
     clean_query = q
-    if "spotify.com/track" in q:
+    if "spotify.com/track" in q or "soundcloud.com" in q:
         flat_meta = extract_flat_metadata(q)
         if flat_meta and flat_meta.get('title'):
-            clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}"
-    elif "soundcloud.com" in q:
-        flat_meta = extract_flat_metadata(q)
-        if flat_meta and flat_meta.get('title'):
-            clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}"
+            clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}".strip()
 
     search_info = await fetch_piped_search(clean_query)
     if search_info:
@@ -305,38 +300,39 @@ async def extract_info(query: str) -> dict:
             return search_info
 
     # FLUJO 3: Fallback a archivo directo o stream media (.mp3, .flac, .ogg, etc.)
-    if q.startswith("http://") or q.startswith("https://"):
-        try:
-            from yt_dlp import YoutubeDL
-            ydl_opts = {
-                "format": "bestaudio/best",
-                "noplaylist": True,
-                "quiet": True,
-                "nocheckcertificate": True
+    search_target = q if q.startswith("http") else f"ytsearch:{q}"
+    try:
+        from yt_dlp import YoutubeDL
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "nocheckcertificate": True,
+            "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}}
+        }
+        def _yt_direct():
+            with YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(search_target, download=False)
+
+        info = await asyncio.to_thread(_yt_direct)
+        if info:
+            entry = info['entries'][0] if 'entries' in info and info['entries'] else info
+            stream_url = entry.get('url')
+            formats = entry.get('formats', [])
+            if not stream_url and formats:
+                audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                if audio_formats:
+                    stream_url = audio_formats[-1]['url']
+
+            return {
+                'id': entry.get('id', 'direct'),
+                'title': entry.get('title', q),
+                'url': stream_url or q,
+                'duration': entry.get('duration', 0),
+                'uploader': entry.get('uploader', 'Direct Stream'),
+                'thumbnail': entry.get('thumbnail', '')
             }
-            def _yt_direct():
-                with YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(q, download=False)
-
-            info = await asyncio.to_thread(_yt_direct)
-            if info:
-                entry = info['entries'][0] if 'entries' in info and info['entries'] else info
-                stream_url = entry.get('url')
-                formats = entry.get('formats', [])
-                if not stream_url and formats:
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                    if audio_formats:
-                        stream_url = audio_formats[-1]['url']
-
-                return {
-                    'id': entry.get('id', 'direct'),
-                    'title': entry.get('title', 'Direct Stream'),
-                    'url': stream_url or q,
-                    'duration': entry.get('duration', 0),
-                    'uploader': entry.get('uploader', 'Direct Stream'),
-                    'thumbnail': entry.get('thumbnail', '')
-                }
-        except Exception as fallback_err:
-            print(f"⚠️ Fallback directo falló: {fallback_err}", flush=True)
+    except Exception as fallback_err:
+        print(f"⚠️ Fallback directo falló: {fallback_err}", flush=True)
 
     raise RuntimeError(f"No se pudo resolver el stream de audio para: '{query}'")
