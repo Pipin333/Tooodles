@@ -149,15 +149,14 @@ class MusicCore(commands.Cog):
         return {
             "format": "bestaudio/best",
             "noplaylist": True,
-            "quiet": False,
+            "quiet": True,
             "nocheckcertificate": True,
             "default_search": "ytsearch",
-            "username": "oauth2",
-            "password": "",
             "cookiefile": self.cookie_file if self.cookie_file else None,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["tv", "android", "ios"]
+                    "player_client": ["android", "ios", "mweb"],
+                    "player_skip": ["webpage", "configs"]
                 }
             }
         }
@@ -280,27 +279,43 @@ class MusicCore(commands.Cog):
                 info = ydl.extract_info(query, download=False)
                 return info['entries'][0] if 'entries' in info else info
         except Exception as e:
-            print(f"⚠️ Extracción nativa falló ({e}). Probando Playwright Stealth...", flush=True)
+            print(f"⚠️ Extracción nativa falló ({e}). Probando YouTube Music API oficial...", flush=True)
             
-            # Generar cookies con Playwright Stealth
+            # 1. Probar YouTube Music API oficial (Obtiene la versión oficial de álbumes como Rubber Soul)
+            ytm_opts = {
+                "format": "bestaudio/best",
+                "noplaylist": True,
+                "quiet": True,
+                "cookiefile": self.cookie_file if self.cookie_file else None,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["tvhtml5", "android"],
+                        "player_skip": ["webpage"]
+                    }
+                }
+            }
+            try:
+                search_term = query if query.startswith("http") else f"ytmusicsearch:{query}"
+                with YoutubeDL(ytm_opts) as ydl:
+                    ytm_info = ydl.extract_info(search_term, download=False)
+                    res = ytm_info['entries'][0] if 'entries' in ytm_info else ytm_info
+                    print(f"✅ Canción oficial obtenida vía YouTube Music: {res.get('title')}", flush=True)
+                    return res
+            except Exception as ytm_err:
+                print(f"⚠️ YouTube Music API falló: {ytm_err}", flush=True)
+
+            # 2. Generar cookies con Playwright Stealth si es necesario
             new_cookies = await fetch_stealth_cookies()
             if new_cookies:
                 os.environ["cookies"] = new_cookies
                 self.cookie_file = self.setup_cookies()
-                ydl_opts = self.get_ydl_opts()
-                try:
-                    with YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(query, download=False)
-                        return info['entries'][0] if 'entries' in info else info
-                except Exception:
-                    pass
 
-            # Si falla YouTube directo, usar Fallback con Invidious/Piped
+            # 3. Probando Fallback Invidious / Piped (YouTube Espejos)
             fallback_info = await self.fetch_fallback_audio(query)
             if fallback_info:
                 return fallback_info
 
-            # Fallback nativo a SoundCloud (0 bloqueos de bot en IPs de Datacenter)
+            # 4. Fallback SoundCloud
             print(f"🎵 Probando fallback nativo SoundCloud para: '{query}'...", flush=True)
             sc_opts = {
                 "format": "bestaudio/best",
@@ -312,7 +327,7 @@ class MusicCore(commands.Cog):
                 with YoutubeDL(sc_opts) as ydl:
                     sc_info = ydl.extract_info(f"scsearch:{query}", download=False)
                     res = sc_info['entries'][0] if 'entries' in sc_info else sc_info
-                    print(f"✅ Canción obtenida exitosamente vía SoundCloud: {res.get('title')}", flush=True)
+                    print(f"✅ Canción obtenida vía SoundCloud: {res.get('title')}", flush=True)
                     return res
             except Exception as sc_err:
                 print(f"⚠️ Fallback SoundCloud falló: {sc_err}", flush=True)
@@ -325,7 +340,8 @@ class MusicCore(commands.Cog):
             stream_url = self.get_stream_url(info)
             await self.add_song(ctx, info['title'], stream_url, info.get('duration', 0), origin)
         except Exception as e:
-            await ctx.send(f"❌ Error al buscar canción en YouTube: {e}")
+            print(f"❌ Error interno en la búsqueda/extracción: {e}", flush=True)
+            await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
 
     async def add_from_spotify(self, ctx, url):
         if not self.sp:
@@ -337,7 +353,8 @@ class MusicCore(commands.Cog):
             query = f"{track['name']} {track['artists'][0]['name']}"
             await self.add_from_youtube(ctx, query, origin=f"🎵 Desde Spotify por {ctx.author.name}")
         except Exception as e:
-            await ctx.send(f"❌ Error al procesar enlace de Spotify: {e}")
+            print(f"❌ Error al procesar enlace de Spotify: {e}", flush=True)
+            await ctx.send("❌ Error al procesar el enlace de Spotify.")
 
     async def add_playlist_from_spotify(self, ctx, url):
         if not self.sp:
@@ -354,7 +371,8 @@ class MusicCore(commands.Cog):
                     query = f"{track['name']} {track['artists'][0]['name']}"
                     await self.add_from_youtube(ctx, query, origin=f"🎵 Playlist por {ctx.author.name}")
         except Exception as e:
-            await ctx.send(f"❌ Error al cargar playlist de Spotify: {e}")
+            print(f"❌ Error al procesar playlist de Spotify: {e}", flush=True)
+            await ctx.send("❌ Error al cargar la playlist de Spotify.")
 
     async def play_next(self, ctx):
         if not self.song_queue:
