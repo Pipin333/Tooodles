@@ -149,14 +149,15 @@ class MusicCore(commands.Cog):
         return {
             "format": "bestaudio/best",
             "noplaylist": True,
-            "quiet": True,
+            "quiet": False,
             "nocheckcertificate": True,
-            "cookiefile": self.cookie_file if self.cookie_file else None,
             "default_search": "ytsearch",
+            "username": "oauth2",
+            "password": "",
+            "cookiefile": self.cookie_file if self.cookie_file else None,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "ios"],
-                    "player_skip": ["webpage", "configs"]
+                    "player_client": ["tv", "android", "ios"]
                 }
             }
         }
@@ -279,7 +280,7 @@ class MusicCore(commands.Cog):
                 info = ydl.extract_info(query, download=False)
                 return info['entries'][0] if 'entries' in info else info
         except Exception as e:
-            print(f"⚠️ Extracción nativa falló ({e}). Probando Playwright Stealth...")
+            print(f"⚠️ Extracción nativa falló ({e}). Probando Playwright Stealth...", flush=True)
             
             # Generar cookies con Playwright Stealth
             new_cookies = await fetch_stealth_cookies()
@@ -298,6 +299,23 @@ class MusicCore(commands.Cog):
             fallback_info = await self.fetch_fallback_audio(query)
             if fallback_info:
                 return fallback_info
+
+            # Fallback nativo a SoundCloud (0 bloqueos de bot en IPs de Datacenter)
+            print(f"🎵 Probando fallback nativo SoundCloud para: '{query}'...", flush=True)
+            sc_opts = {
+                "format": "bestaudio/best",
+                "noplaylist": True,
+                "quiet": True,
+                "default_search": "scsearch"
+            }
+            try:
+                with YoutubeDL(sc_opts) as ydl:
+                    sc_info = ydl.extract_info(f"scsearch:{query}", download=False)
+                    res = sc_info['entries'][0] if 'entries' in sc_info else sc_info
+                    print(f"✅ Canción obtenida exitosamente vía SoundCloud: {res.get('title')}", flush=True)
+                    return res
+            except Exception as sc_err:
+                print(f"⚠️ Fallback SoundCloud falló: {sc_err}", flush=True)
 
             raise e
 
