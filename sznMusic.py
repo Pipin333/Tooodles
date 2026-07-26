@@ -186,18 +186,19 @@ class MusicCore(commands.Cog):
 
         piped_instances = [
             "https://pipedapi.kavin.rocks",
-            "https://api.piped.video",
-            "https://pipedapi.tokhmi.xyz"
+            "https://piped-api.garudalinux.org",
+            "https://api.piped.privacydev.net"
         ]
         
         invidious_instances = [
-            "https://invidious.privacydev.net",
-            "https://inv.tux.pizza",
-            "https://invidious.drgns.space",
+            "https://inv.nadeko.net",
+            "https://invidious.no-jonas.de",
+            "https://invidious.io.lol",
             "https://invidious.nerdvpn.de"
         ]
 
-        async with aiohttp.ClientSession(headers=headers) as session:
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
             # 1. Probar Piped API
             for p_inst in piped_instances:
                 try:
@@ -207,7 +208,7 @@ class MusicCore(commands.Cog):
 
                     if not target_id:
                         s_url = f"{p_inst}/search?q={encoded_query}&filter=all"
-                        async with session.get(s_url, timeout=4) as resp:
+                        async with session.get(s_url, timeout=5) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 items = data.get("items", [])
@@ -219,7 +220,7 @@ class MusicCore(commands.Cog):
 
                     if target_id:
                         st_url = f"{p_inst}/streams/{target_id}"
-                        async with session.get(st_url, timeout=4) as d_resp:
+                        async with session.get(st_url, timeout=5) as d_resp:
                             if d_resp.status == 200:
                                 d_data = await d_resp.json()
                                 audio_streams = d_data.get("audioStreams", [])
@@ -243,7 +244,7 @@ class MusicCore(commands.Cog):
 
                     if not target_id:
                         s_url = f"{i_inst}/api/v1/search?q={encoded_query}&type=video"
-                        async with session.get(s_url, timeout=4) as resp:
+                        async with session.get(s_url, timeout=5) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 if data and isinstance(data, list) and len(data) > 0:
@@ -254,7 +255,7 @@ class MusicCore(commands.Cog):
 
                     if target_id:
                         d_url = f"{i_inst}/api/v1/videos/{target_id}"
-                        async with session.get(d_url, timeout=4) as d_resp:
+                        async with session.get(d_url, timeout=5) as d_resp:
                             if d_resp.status == 200:
                                 d_data = await d_resp.json()
                                 audio_streams = d_data.get("adaptiveFormats", [])
