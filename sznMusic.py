@@ -133,6 +133,18 @@ class MusicCore(commands.Cog):
         if not self.current_song:
             await self.play_next(ctx)
 
+    def get_stream_url(self, info):
+        """Extrae la URL de transmisión directa de audio para FFmpeg."""
+        if not info:
+            return None
+        formats = info.get('formats', [])
+        audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+        if not audio_formats:
+            audio_formats = [f for f in formats if f.get('acodec') != 'none']
+        if audio_formats:
+            return audio_formats[-1].get('url')
+        return info.get('url')
+
     async def search_youtube(self, query):
         ydl_opts = self.get_ydl_opts()
         try:
@@ -162,7 +174,8 @@ class MusicCore(commands.Cog):
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
         try:
             info = await self.search_youtube(query)
-            await self.add_song(ctx, info['title'], info['url'], info.get('duration', 0), origin)
+            stream_url = self.get_stream_url(info)
+            await self.add_song(ctx, info['title'], stream_url, info.get('duration', 0), origin)
         except Exception as e:
             await ctx.send(f"❌ Error al buscar canción en YouTube: {e}")
 
