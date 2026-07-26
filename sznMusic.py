@@ -82,12 +82,28 @@ class MusicCore(commands.Cog):
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.send("⚠️ Debes estar en un canal de voz para usar este comando.")
             return None
-        
+
         target_channel = ctx.author.voice.channel
-        if not self.voice_client or not self.voice_client.is_connected():
-            self.voice_client = await target_channel.connect()
-        elif self.voice_client.channel != target_channel:
-            await self.voice_client.move_to(target_channel)
+
+        if ctx.guild.voice_client:
+            guild_vc = ctx.guild.voice_client
+            if guild_vc.is_connected():
+                if guild_vc.channel != target_channel:
+                    await guild_vc.move_to(target_channel)
+                self.voice_client = guild_vc
+                return self.voice_client
+            else:
+                try:
+                    await guild_vc.disconnect(force=True)
+                except Exception:
+                    pass
+
+        try:
+            self.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
+        except Exception as e:
+            print(f"❌ Error al conectar al canal de voz: {e}")
+            await ctx.send(f"❌ No me pude conectar al canal de voz: {e}")
+            return None
 
         return self.voice_client
 
