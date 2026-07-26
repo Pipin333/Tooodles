@@ -1,100 +1,99 @@
-# Tooodles – Bot de música para Discord
+# Tooodles 🎵 – Bot de Música de Alta Eficiencia para Discord
 
-Tooodles es un bot modular de música para Discord construido sobre el framework **Discord.py**. Permite reproducir audio desde YouTube y Spotify, gestiona colas de canciones, almacena preferencias de usuario y ofrece un modo radio inteligente. Su arquitectura se apoya en cogs modulares y una base de datos PostgreSQL para persistir información.
+**Tooodles** es un bot de música modular, eficiente y resiliente para Discord construido sobre **Python 3.11** y **Discord.py**. 
 
-## 🚀 Funcionalidades principales
+Está diseñado para funcionar sin interrupciones en servidores de recursos reducidos (como **Oracle Cloud Infrastructure / OCI** con 1 OCPU y 1 GB RAM), utilizando una arquitectura desacoplada con extracción ligera vía la **API de Piped/Invidious**, **precarga de búfer en memoria caché**, **Playwright Stealth** y soporte para **Spotify**.
 
-* **Reproducción de música desde YouTube y Spotify**: utiliza `yt_dlp` y las APIs de Spotify para extraer audio y metadatos.
-* **Gestión de colas y favoritos**: organiza las canciones en listas, permite saltar, pausar y reordenar temas.
-* **Modo Radio**: sugiere y reproduce canciones similares automáticamente.
-* **Persistencia de datos**: guarda las preferencias de usuarios y listas en una base de datos PostgreSQL.
-* **Arquitectura modular con cogs**: separa la lógica de base de datos (`MusicDB`), la de reproducción (`MusicCore`) y la interfaz (`MusicUI`), cargándolas en el orden correcto.
-* **Integración con servicios externos**: usa Spotify para listas y metadatos, YouTube para extracción de audio y FFmpeg para la transmisión.
+---
 
-## 🛠️ Tecnologías y dependencias
+## 🌟 Características Principales
 
-* **Python ≥ 3.11**, Git y FFmpeg.
-* **Discord.py** (para la API de Discord) y **SQLAlchemy** (ORM con PostgreSQL).
-* **yt_dlp** y **spotipy** para integrar YouTube y Spotify.
-* Base de datos **PostgreSQL 13+**.
-* **Docker** (opcional) para un despliegue consistente.
+- 🌐 **Extracción Ligera vía Piped & Invidious REST API**: Evita los bloqueos anti-bot de YouTube en servidores de nube sin realizar descargas pesadas ni scraping de HTML.
+- ⚡ **Latencia 0ms con Precarga de Chunk (2MB)**: Descarga automáticamente los primeros 2 MB (`Range: bytes=0-2097152`) de la siguiente canción a `/tmp/cache_{id}.webm` en segundo plano para una reproducción instantánea sin buffering.
+- 🕵️ **Generación de Cookies con Playwright Stealth**: Captura y renueva cookies de sesión de YouTube automáticamente en segundo plano almacenándolas cifradas en SQLite/PostgreSQL.
+- 🎧 **Soporte Completo para Spotify & SoundCloud**: Resuelve canciones y playlists de Spotify a través de su API oficial y hace match con el catálogo de YouTube/Piped.
+- 🔍 **Búsqueda Difusa con `rapidfuzz`**: Permite buscar y encontrar temas guardados en la base de datos local usando coincidencia por similitud.
+- 📻 **Modo Radio Colectivo / Automático**: Genera listas de recomendación automáticas basadas en la canción actual o los gustos grupales en la llamada de voz.
+- 🧹 **Limpieza Automática y Control de Inactividad**: Elimina búferes temporales de `/tmp` y desconecta el bot tras 120 segundos de inactividad para liberar RAM y CPU.
+- 🚀 **Despliegue en 1 Clic con `./start.sh`**: Script Bash automatizado para actualizar repositorio, compilar contenedor Docker y mostrar logs en tiempo real.
 
-## 📦 Instalación
+---
 
-### Requisitos previos
+## 🧩 Arquitectura del Proyecto
 
-Debes tener instalados Python 3.11+, FFmpeg, PostgreSQL y Git. También necesitarás cuentas de desarrollador para Discord y Spotify.
+```
+Tooodles/
+├── main.py               # Punto de entrada, inicialización de BD y carga secuencial de Cogs
+├── sznUtils.py           # Capa de extracción ligera (Piped API, Invidious, Playwright Stealth)
+├── sznMusic.py           # Capa del reproductor (MusicCore: Cola, FFmpeg, Chunk Prefetching)
+├── sznDB.py              # Capa de base de datos (MusicDB: Favoritos, Historial, Radio)
+├── sznUI.py              # Capa de interfaz (MusicUI: Embeds interactivos, Botones y Vistas)
+├── database.py           # Modelos SQLAlchemy (Song, UserLike, AppConfig) y gestor de sesiones
+├── start.sh              # Script de despliegue automatizado para Docker
+└── Dockerfile            # Configuración Docker optimizada con capas de caché y FFmpeg
+```
 
-### 1. Despliegue con Docker (recomendado)
+### Orden de Carga de Cogs
+1. **`MusicDB` (`sznDB.py`)**: Gestión de estadísticas, favoritos y búsquedas difusas.
+2. **`MusicCore` (`sznMusic.py`)**: Gestión de la voz, colas, prebuffering y comandos de reproducción.
+3. **`MusicUI` (`sznUI.py`)**: Controles visuales con botones interactivos de Discord.
 
-1. Clona el repositorio y accede a la carpeta del proyecto.
-2. Construye la imagen y arráncala:
+---
 
-   ```bash
-   docker build -t tooodles .
-   docker run --env-file .env tooodles
-   ```
+## ⚙️ Comando de Referencia
 
-El `Dockerfile` instala las dependencias, copia el proyecto y ejecuta `main.py`.
+| Comando | Descripción |
+| :--- | :--- |
+| `td?p <canción o link>` | Reproduce audio desde YouTube, Spotify o SoundCloud. |
+| `td?skip` (`td?s`) | Salta la canción actual. |
+| `td?queue` (`td?q`) | Muestra la cola de reproducción actual. |
+| `td?nowplaying` (`td?np`) | Muestra información del tema sonando actualmente. |
+| `td?pause` / `td?resume` | Pausa o reanuda la reproducción. |
+| `td?stop` | Detiene la música, vacía la cola y limpia el caché. |
+| `td?shuffle` | Mezcla la cola aleatoriamente. |
+| `td?move <origen> <destino>`| Mueve una canción de posición en la cola. |
+| `td?remove <índice>` | Elimina una canción específica de la cola. |
+| `td?like` / `td?unlike` | Guarda o quita el tema actual de tus favoritas. |
+| `td?liked` | Lista tus canciones favoritas guardadas. |
+| `td?favradio` | Inicia una radio basada en los gustos colectivos de la llamada. |
+| `td?radio <0.0-1.0>` | Inicia la radio automática basada en la canción actual. |
+| `td?historial` | Muestra los últimos 20 temas reproducidos. |
+| `td?top` | Muestra el top global de canciones más escuchadas. |
+| `td?help` | Abre el menú de ayuda interactivo. |
 
-### 2. Instalación directa en Python
+---
 
-1. Clona el repositorio:
+## 🛠️ Requisitos e Instalación
 
-   ```bash
-   git clone https://github.com/Pipin333/Tooodles
-   cd Tooodles
-   ```
+### Variables de Entorno (`.env`)
 
-2. Instala las dependencias:
+Crea un archivo `.env` en la raíz del proyecto:
 
-   ```bash
-   python -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
+```env
+token_priv=TU_DISCORD_BOT_TOKEN
+client_id=TU_SPOTIFY_CLIENT_ID
+client_secret=TU_SPOTIFY_CLIENT_SECRET
+DATABASE_URL=sqlite:///tooodles.db
+```
 
-3. Crea un archivo `.env` con estas variables:
+### 🚀 Despliegue con Docker (Recomendado)
 
-   * `DATABASE_URL` – cadena de conexión a PostgreSQL.
-   * `SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET` – credenciales de Spotify.
-   * `token_priv` – token de bot de Discord.
+En tu servidor VPS o Docker:
 
-4. Inicia el bot:
+```bash
+chmod +x start.sh
+./start.sh
+```
 
-   ```bash
-   python main.py
-   ```
+El script `./start.sh` realizará automáticamente:
+1. `git pull` para obtener el último código.
+2. Detención y remoción del contenedor anterior.
+3. Compilación de la imagen Docker (`tooodles-bot`).
+4. Lanzamiento del contenedor con reinicio automático.
+5. Apertura de logs en tiempo real (`docker logs -f tooodles`).
 
-## ⚙️ Uso básico
+---
 
-Una vez en línea, prueba estos comandos para verificar que el bot responde:
+## 📜 Licencia & Créditos
 
-* `td?help` – Muestra ayuda general.
-* `td?ping` – Muestra la latencia actual.
-* `td?play [canción o enlace]` – Reproduce música y se une al canal de voz.
-* `td?queue` – Muestra la cola de reproducción.
-
-Asegúrate de que la base de datos esté operativa y de que las credenciales de Spotify y Discord sean válidas.
-
-## 🧩 Arquitectura y componentes
-
-Tooodles se organiza en cogs que se cargan en un orden específico para resolver dependencias:
-
-| Orden de carga | Cog         | Responsabilidad principal                                       |
-| -------------- | ----------- | --------------------------------------------------------------- |
-| **1**          | `MusicDB`   | Opera con la base de datos y rastrea canciones.                 |
-| **2**          | `MusicCore` | Maneja la reproducción y la integración con servicios externos. |
-| **3**          | `MusicUI`   | Implementa la interfaz y comandos de Discord.                   |
-
-La capa de persistencia utiliza SQLAlchemy y gestiona las transacciones con context managers, manteniendo en memoria algunas canciones en un diccionario de caché. El bot se comunica con YouTube y Spotify mediante wrappers (`yt_dlp` y `spotipy`) y usa FFmpeg para procesar audio.
-
-## 🧑‍💻 Contribución y extensión
-
-Puedes añadir nuevas funciones como listas de reproducción, filtros de audio o integración con otros servicios. Asegúrate de:
-
-1. Crear un nuevo cog para cada funcionalidad.
-2. Inyectar dependencias necesarias a través del bot.
-3. Documentar cualquier nuevo comando en la ayuda (`td?help`).
-
-Pull requests y reportes de issues son bienvenidos.
+Desarrollado para la comunidad. Impulsado por **Discord.py**, **SQLAlchemy**, **Piped API**, **Invidious API**, **Playwright** y **FFmpeg**.
