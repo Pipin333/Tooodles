@@ -140,18 +140,24 @@ class MusicCore(commands.Cog):
                 info = ydl.extract_info(query, download=False)
                 return info['entries'][0] if 'entries' in info else info
         except Exception as e:
-            err_str = str(e).lower()
-            if "sign in" in err_str or "bot" in err_str:
-                print("🕵️ Detección de bot en YouTube. Intentando refrescar cookies vía Playwright Stealth...")
-                new_cookies = await fetch_stealth_cookies()
-                if new_cookies:
-                    os.environ["cookies"] = new_cookies
-                    self.cookie_file = self.setup_cookies()
-                    ydl_opts = self.get_ydl_opts()
-                    with YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(query, download=False)
-                        return info['entries'][0] if 'entries' in info else info
-            raise e
+            print(f"⚠️ Primer intento con YouTube falló ({e}). Activando Playwright Stealth & YouTube Music API...")
+            
+            # Generar cookies con Playwright Stealth
+            new_cookies = await fetch_stealth_cookies()
+            if new_cookies:
+                os.environ["cookies"] = new_cookies
+                self.cookie_file = self.setup_cookies()
+
+            # Intentar búsqueda con YouTube Music API o consulta formateada
+            search_target = query if query.startswith("http") else f"ytmusicsearch:{query}"
+            ydl_opts = self.get_ydl_opts()
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(search_target, download=False)
+                    return info['entries'][0] if 'entries' in info else info
+            except Exception as ex:
+                print(f"❌ Falló segundo intento: {ex}")
+                raise ex
 
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
         try:
