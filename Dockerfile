@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+ENV PYTHONUNBUFFERED=1
+
 # Instala FFmpeg y paquetes de sistema
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg && \

@@ -161,10 +161,22 @@ class MusicCore(commands.Cog):
             }
         }
 
+    def extract_video_id(self, query):
+        q = query.strip()
+        if "v=" in q:
+            return q.split("v=")[1].split("&")[0]
+        elif "youtu.be/" in q:
+            return q.split("youtu.be/")[1].split("?")[0]
+        elif len(q) == 11 and not " " in q and not "/" in q:
+            return q
+        return None
+
     async def fetch_fallback_audio(self, query):
         """Busca y extrae stream de audio usando la API publica de Invidious/Piped cuando YouTube bloquea IPs de Datacenter."""
         import aiohttp
-        print(f"🌐 Usando fallback público Invidious/Piped para: {query}")
+        print(f"🌐 Usando fallback público Invidious/Piped para: {query}", flush=True)
+        video_id = self.extract_video_id(query)
+        
         instances = [
             "https://invidious.nerdvpn.de",
             "https://inv.tux.pizza",
@@ -175,32 +187,40 @@ class MusicCore(commands.Cog):
         async with aiohttp.ClientSession() as session:
             for instance in instances:
                 try:
-                    search_url = f"{instance}/api/v1/search?q={query}&type=video"
-                    async with session.get(search_url, timeout=5) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if data and isinstance(data, list) and len(data) > 0:
-                                first = data[0]
-                                video_id = first.get("videoId")
-                                title = first.get("title", query)
-                                duration = first.get("lengthSeconds", 0)
+                    target_id = video_id
+                    title = query
+                    duration = 0
 
-                                # Obtener stream
-                                detail_url = f"{instance}/api/v1/videos/{video_id}"
-                                async with session.get(detail_url, timeout=5) as d_resp:
-                                    if d_resp.status == 200:
-                                        d_data = await d_resp.json()
-                                        audio_streams = d_data.get("adaptiveFormats", [])
-                                        audio_only = [s for s in audio_streams if "audio" in s.get("type", "").lower()]
-                                        if audio_only:
-                                            print(f"✅ Audio obtenido desde instancia alternativa ({instance}): {title}")
-                                            return {
-                                                "title": title,
-                                                "url": audio_only[0].get("url"),
-                                                "duration": duration
-                                            }
+                    if not target_id:
+                        search_url = f"{instance}/api/v1/search?q={query}&type=video"
+                        async with session.get(search_url, timeout=5) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                if data and isinstance(data, list) and len(data) > 0:
+                                    first = data[0]
+                                    target_id = first.get("videoId")
+                                    title = first.get("title", query)
+                                    duration = first.get("lengthSeconds", 0)
+
+                    if target_id:
+                        detail_url = f"{instance}/api/v1/videos/{target_id}"
+                        async with session.get(detail_url, timeout=5) as d_resp:
+                            if d_resp.status == 200:
+                                d_data = await d_resp.json()
+                                if not title or title == query:
+                                    title = d_data.get("title", query)
+                                duration = d_data.get("lengthSeconds", duration)
+                                audio_streams = d_data.get("adaptiveFormats", [])
+                                audio_only = [s for s in audio_streams if "audio" in s.get("type", "").lower()]
+                                if audio_only:
+                                    print(f"✅ Audio obtenido desde instancia alternativa ({instance}): {title}", flush=True)
+                                    return {
+                                        "title": title,
+                                        "url": audio_only[0].get("url"),
+                                        "duration": duration
+                                    }
                 except Exception as e:
-                    print(f"⚠️ Instancia {instance} no respondió: {e}")
+                    print(f"⚠️ Instancia {instance} no respondió: {e}", flush=True)
                     continue
 
         return None
