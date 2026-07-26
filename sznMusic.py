@@ -286,16 +286,16 @@ class MusicCore(commands.Cog):
                 "format": "bestaudio/best",
                 "noplaylist": True,
                 "quiet": True,
+                "default_search": "ytsearch",
                 "cookiefile": self.cookie_file if self.cookie_file else None,
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["tvhtml5", "android"],
-                        "player_skip": ["webpage"]
+                        "player_client": ["music", "android", "tvhtml5"]
                     }
                 }
             }
             try:
-                search_term = query if query.startswith("http") else f"ytmusicsearch:{query}"
+                search_term = query if query.startswith("http") else f"ytsearch:{query}"
                 with YoutubeDL(ytm_opts) as ydl:
                     ytm_info = ydl.extract_info(search_term, download=False)
                     res = ytm_info['entries'][0] if 'entries' in ytm_info else ytm_info
