@@ -1,19 +1,18 @@
-# Usa una imagen base de Python
 FROM python:3.11-slim
 
-# Instala FFmpeg y muestra su version para asegurar su correcta instalacion
+# Instala FFmpeg y limpia paquetes temporales
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
-    ffmpeg -version
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
-# Establece el directorio de trabajo
 WORKDIR /app
 
-# Copia los archivos de tu proyecto
-COPY . .
+# Copia e instala dependencias primero para aprovechar el caché de Docker
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Instala las dependencias
-RUN pip install -r requirements.txt
+# Copia el resto del código del proyecto
+COPY . .
 
 # Ejecuta el bot
 CMD ["python", "main.py"]
