@@ -8,8 +8,11 @@ class MusicUI(commands.Cog):
         self.bot = bot
 
     async def notify_now_playing(self, ctx, song_title, origin=None):
-        view = self.MusicControls(self.bot.get_cog("MusicCore"), ctx)
-        view.add_item(Button(label="📜 Ver Cola", style=discord.ButtonStyle.link, url="https://discord.com/channels/{}/{}/".format(ctx.guild.id, ctx.channel.id)))
+        core = self.bot.get_cog("MusicCore")
+        view = self.MusicControls(core, ctx)
+        if ctx.guild and ctx.channel:
+            view.add_item(Button(label="📜 Ver Canal", style=discord.ButtonStyle.link, url=f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/"))
+        
         prefix = "🔁" if origin and "radio" in origin.lower() else "🎶"
         embed = discord.Embed(
             title=f"{prefix} Ahora Reproduciendo",
@@ -20,7 +23,11 @@ class MusicUI(commands.Cog):
             embed.set_footer(text=origin)
         else:
             embed.set_footer(text="Usa los botones para controlar la música o revisa la cola.")
-        await ctx.send(embed=embed, view=view, delete_after=300)
+        
+        try:
+            await ctx.send(embed=embed, view=view, delete_after=300)
+        except Exception as e:
+            print(f"⚠️ Error al enviar notificación de reproducción: {e}")
 
     @commands.command()
     async def controls(self, ctx):
@@ -39,7 +46,7 @@ class MusicUI(commands.Cog):
 
         @discord.ui.button(label="⏯️ Pausa/Reanuda", style=discord.ButtonStyle.primary)
         async def pause_resume(self, interaction: discord.Interaction, button: Button):
-            if not self.core.voice_client or not self.core.current_song:
+            if not self.core or not self.core.voice_client or not self.core.current_song:
                 await interaction.response.send_message("⚠️ No hay nada reproduciéndose.", ephemeral=True)
                 return
             if self.core.voice_client.is_playing():
@@ -48,19 +55,23 @@ class MusicUI(commands.Cog):
             elif self.core.voice_client.is_paused():
                 self.core.voice_client.resume()
                 await interaction.response.send_message("▶️ Canción reanudada.", ephemeral=True)
+            else:
+                await interaction.response.send_message("⚠️ No hay reproducción activa.", ephemeral=True)
 
         @discord.ui.button(label="⏭️ Saltar", style=discord.ButtonStyle.secondary)
         async def skip(self, interaction: discord.Interaction, button: Button):
-            if self.core.song_queue:
+            if not self.core or not self.core.voice_client:
+                await interaction.response.send_message("⚠️ No hay ninguna reproducción activa.", ephemeral=True)
+                return
+            if self.core.voice_client.is_playing() or self.core.voice_client.is_paused():
                 self.core.voice_client.stop()
-                await self.core.play_next(self.ctx)
                 await interaction.response.send_message("⏭️ Canción saltada.", ephemeral=True)
             else:
                 await interaction.response.send_message("🎵 La cola está vacía.", ephemeral=True)
 
         @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger)
         async def stop(self, interaction: discord.Interaction, button: Button):
-            if self.core.voice_client:
+            if self.core and self.core.voice_client:
                 await self.core.voice_client.disconnect()
                 self.core.voice_client = None
                 self.core.song_queue.clear()
@@ -86,7 +97,8 @@ class MusicUI(commands.Cog):
             songs = core.song_queue[start:end]
             content = f"**🎵 Cola de canciones (página {page + 1}/{total_pages}):**\n"
             for i, song in enumerate(songs, start=start + 1):
-                content += f"{i}. **{song['title']}**\n"
+                duration = core.format_duration(song.get('duration', 0))
+                content += f"{i}. **{song['title']}** ({duration})\n"
             return content
 
         class QueueControls(View):
