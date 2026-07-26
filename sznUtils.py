@@ -141,12 +141,24 @@ async def fetch_stealth_cookies() -> str | None:
 # PIPED REST API EXTRACTION LAYER (0% YouTube Bot Blocks, Lightweight & Fast)
 # ==============================================================================
 
+def get_cookie_file_path() -> str | None:
+    cookies_content = os.getenv('cookies') or load_config('cookies')
+    if not cookies_content:
+        return None
+    try:
+        temp = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix='.txt', newline='\n')
+        temp.write(cookies_content)
+        temp.close()
+        return temp.name
+    except Exception:
+        return None
+
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://pipedapi.aston.cx",
     "https://pipedapi.col237.dev",
-    "https://pipedapi.drgns.space"
+    "https://pipedapi.drgns.space",
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de"
 ]
 
 def extract_youtube_id(query: str) -> str | None:
@@ -173,20 +185,20 @@ async def fetch_piped_stream(video_id: str) -> dict | None:
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         for instance in PIPED_INSTANCES:
             try:
-                url = f"{instance}/streams/{video_id}"
+                base_url = instance.rstrip("/")
+                url = f"{base_url}/streams/{video_id}"
                 async with session.get(url, timeout=5) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
                         audio_streams = data.get("audioStreams", [])
                         if audio_streams:
-                            # Elegir el formato de audio con mejor calidad/bitrate
                             best_audio = sorted(audio_streams, key=lambda x: x.get("bitrate", 0), reverse=True)[0]
                             title = data.get("title", f"Video {video_id}")
                             duration = data.get("duration", 0)
                             uploader = data.get("uploader", "YouTube")
                             thumbnail = data.get("thumbnailUrl") or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
                             
-                            print(f"✅ Stream resuelto vía Piped API ({instance}): {title}", flush=True)
+                            print(f"✅ Stream resuelto vía Piped API ({base_url}): {title}", flush=True)
                             return {
                                 'id': video_id,
                                 'title': title,
@@ -196,7 +208,7 @@ async def fetch_piped_stream(video_id: str) -> dict | None:
                                 'thumbnail': thumbnail
                             }
             except Exception as e:
-                print(f"⚠️ Instancia Piped ({instance}) no disponible para stream: {e}", flush=True)
+                print(f"⚠️ Instancia ({instance}) no disponible para stream: {e}", flush=True)
                 continue
 
     return None
@@ -214,20 +226,21 @@ async def fetch_piped_search(query: str) -> dict | None:
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         for instance in PIPED_INSTANCES:
             try:
-                url = f"{instance}/search?q={encoded_query}&filter=all"
+                base_url = instance.rstrip("/")
+                url = f"{base_url}/search?q={encoded_query}&filter=all"
                 async with session.get(url, timeout=5) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
-                        items = data.get("items", [])
+                        items = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
                         for item in items:
-                            item_url = item.get("url", "")
+                            item_url = item.get("url", "") or item.get("videoId", "")
                             video_id = extract_youtube_id(item_url) or item.get("id") or item.get("videoId")
                             if video_id:
                                 stream_info = await fetch_piped_stream(video_id)
                                 if stream_info:
                                     return stream_info
             except Exception as e:
-                print(f"⚠️ Instancia Piped ({instance}) no disponible para búsqueda: {e}", flush=True)
+                print(f"⚠️ Instancia ({instance}) no disponible para búsqueda: {e}", flush=True)
                 continue
 
     return None
@@ -237,12 +250,14 @@ def extract_flat_metadata(query: str) -> dict | None:
     try:
         from yt_dlp import YoutubeDL
         search_target = query if query.startswith("http") else f"ytsearch:{query}"
+        cookie_path = get_cookie_file_path()
         ydl_opts = {
             "extract_flat": True,
             "skip_download": True,
             "quiet": True,
             "noplaylist": True,
-            "nocheckcertificate": True
+            "nocheckcertificate": True,
+            "cookiefile": cookie_path if cookie_path else None
         }
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_target, download=False)
@@ -264,9 +279,6 @@ async def extract_info(query: str) -> dict:
     1. Direct YouTube link / Video ID -> Piped /streams/{id}
     2. Search query or external link (Spotify/SoundCloud) -> Metadata + Piped /search
     3. Direct Media File (.mp3 / raw URL) -> Direct media stream fallback
-    
-    Retorna un diccionario unificado:
-    {'id': str, 'title': str, 'url': str, 'duration': int, 'uploader': str, 'thumbnail': str}
     """
     if not query:
         raise ValueError("Consulta vacía.")
@@ -299,8 +311,9 @@ async def extract_info(query: str) -> dict:
         if search_info:
             return search_info
 
-    # FLUJO 3: Fallback a archivo directo o stream media (.mp3, .flac, .ogg, etc.)
+    # FLUJO 3: Fallback a yt-dlp nativo con cookies stealth
     search_target = q if q.startswith("http") else f"ytsearch:{q}"
+    cookie_path = get_cookie_file_path()
     try:
         from yt_dlp import YoutubeDL
         ydl_opts = {
@@ -308,6 +321,7 @@ async def extract_info(query: str) -> dict:
             "noplaylist": True,
             "quiet": True,
             "nocheckcertificate": True,
+            "cookiefile": cookie_path if cookie_path else None,
             "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}}
         }
         def _yt_direct():
