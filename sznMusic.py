@@ -145,6 +145,66 @@ class MusicCore(commands.Cog):
             return audio_formats[-1].get('url')
         return info.get('url')
 
+    def get_ydl_opts(self):
+        return {
+            "format": "bestaudio/best",
+            "noplaylist": True,
+            "quiet": True,
+            "nocheckcertificate": True,
+            "cookiefile": self.cookie_file if self.cookie_file else None,
+            "default_search": "ytsearch",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios"],
+                    "player_skip": ["webpage", "configs"]
+                }
+            }
+        }
+
+    async def fetch_fallback_audio(self, query):
+        """Busca y extrae stream de audio usando la API publica de Invidious/Piped cuando YouTube bloquea IPs de Datacenter."""
+        import aiohttp
+        print(f"🌐 Usando fallback público Invidious/Piped para: {query}")
+        instances = [
+            "https://invidious.nerdvpn.de",
+            "https://inv.tux.pizza",
+            "https://invidious.drgns.space",
+            "https://pipedapi.kavin.rocks"
+        ]
+        
+        async with aiohttp.ClientSession() as session:
+            for instance in instances:
+                try:
+                    search_url = f"{instance}/api/v1/search?q={query}&type=video"
+                    async with session.get(search_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data and isinstance(data, list) and len(data) > 0:
+                                first = data[0]
+                                video_id = first.get("videoId")
+                                title = first.get("title", query)
+                                duration = first.get("lengthSeconds", 0)
+
+                                # Obtener stream
+                                detail_url = f"{instance}/api/v1/videos/{video_id}"
+                                async with session.get(detail_url, timeout=5) as d_resp:
+                                    if d_resp.status == 200:
+                                        d_data = await d_resp.json()
+                                        audio_streams = d_data.get("adaptiveFormats", [])
+                                        audio_only = [s for s in audio_streams if "audio" in s.get("type", "").lower()]
+                                        if audio_only:
+                                            print(f"✅ Audio obtenido desde instancia alternativa ({instance}): {title}")
+                                            return {
+                                                "title": title,
+                                                "url": audio_only[0].get("url"),
+                                                "duration": duration
+                                            }
+                except Exception as e:
+                    print(f"⚠️ Instancia {instance} no respondió: {e}")
+                    continue
+
+        return None
+
     async def search_youtube(self, query):
         ydl_opts = self.get_ydl_opts()
         try:
@@ -152,24 +212,27 @@ class MusicCore(commands.Cog):
                 info = ydl.extract_info(query, download=False)
                 return info['entries'][0] if 'entries' in info else info
         except Exception as e:
-            print(f"⚠️ Primer intento con YouTube falló ({e}). Activando Playwright Stealth & YouTube Music API...")
+            print(f"⚠️ Extracción nativa falló ({e}). Probando Playwright Stealth...")
             
             # Generar cookies con Playwright Stealth
             new_cookies = await fetch_stealth_cookies()
             if new_cookies:
                 os.environ["cookies"] = new_cookies
                 self.cookie_file = self.setup_cookies()
+                ydl_opts = self.get_ydl_opts()
+                try:
+                    with YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(query, download=False)
+                        return info['entries'][0] if 'entries' in info else info
+                except Exception:
+                    pass
 
-            # Intentar búsqueda con YouTube Music API o consulta formateada
-            search_target = query if query.startswith("http") else f"ytmusicsearch:{query}"
-            ydl_opts = self.get_ydl_opts()
-            try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(search_target, download=False)
-                    return info['entries'][0] if 'entries' in info else info
-            except Exception as ex:
-                print(f"❌ Falló segundo intento: {ex}")
-                raise ex
+            # Si falla YouTube directo, usar Fallback con Invidious/Piped
+            fallback_info = await self.fetch_fallback_audio(query)
+            if fallback_info:
+                return fallback_info
+
+            raise e
 
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
         try:
