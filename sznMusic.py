@@ -236,7 +236,10 @@ class MusicCore(commands.Cog):
         if not target_path or not os.path.exists(target_path):
             target_path = self.current_song.get('url')
 
-        ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+        if target_path and target_path.startswith("http"):
+            ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+        else:
+            ffmpeg_before_options = ''
         ffmpeg_options = '-vn'
 
         def after_playing(error):
