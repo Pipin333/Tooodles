@@ -455,36 +455,39 @@ class MusicCore(commands.Cog):
                     except Exception as e:
                         print(f"⚠️ [RADIO] Capa 1 falló: {e}", flush=True)
 
-                    # Capa 2: Artistas relacionados (usando la API oficial de Spotify artist_related_artists)
+                    # Capa 2: Artistas del mismo género (usando los géneros oficiales del artista y búsqueda por género)
                     if len(recommended_titles) < 5 and seed_artist_id:
                         try:
-                            related_res = self.sp.artist_related_artists(seed_artist_id)
-                            related_artists = related_res.get('artists', [])
-                            print(f"📻 [RADIO DEBUG] Capa 2 (relacionados a id:{seed_artist_id}): encontrados {len(related_artists)} artistas", flush=True)
+                            artist_info = self.sp.artist(seed_artist_id)
+                            genres = artist_info.get('genres', [])
+                            print(f"📻 [RADIO DEBUG] Capa 2 (géneros de id:{seed_artist_id}): {genres}", flush=True)
                             
-                            if related_artists:
-                                shuffled_related = list(related_artists)
-                                random.shuffle(shuffled_related)
+                            if genres:
+                                shuffled_genres = list(genres)
+                                random.shuffle(shuffled_genres)
                                 
-                                for rel_artist in shuffled_related:
+                                for gen_name in shuffled_genres:
                                     if len(recommended_titles) >= 5:
                                         break
-                                    rel_name = rel_artist['name']
+                                    # Buscar canciones en ese género exacto
+                                    search_q_genre = f'genre:"{gen_name}"'
                                     try:
-                                        rel_search = self.sp.search(q=f"artist:{rel_name}", type='track', limit=10)
-                                        rel_tracks = rel_search.get('tracks', {}).get('items', [])
-                                        if rel_tracks:
-                                            random.shuffle(rel_tracks)
-                                            for t in rel_tracks:
-                                                full_name = f"{t['name']} - {t['artists'][0]['name']}"
-                                                if self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                        gen_search = self.sp.search(q=search_q_genre, type='track', limit=20)
+                                        gen_tracks = gen_search.get('tracks', {}).get('items', [])
+                                        if gen_tracks:
+                                            random.shuffle(gen_tracks)
+                                            for t in gen_tracks:
+                                                t_artist = t['artists'][0]['name']
+                                                full_name = f"{t['name']} - {t_artist}"
+                                                if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
                                                     recommended_titles.append(full_name)
-                                                    print(f"📻 [RADIO DEBUG] Añadido tema de artista relacionado '{rel_name}': '{full_name}'", flush=True)
-                                                    break # Solo 1 por cada artista relacionado para variedad
-                                    except Exception as rel_search_err:
-                                        print(f"⚠️ [RADIO] Búsqueda de track para {rel_name} falló: {rel_search_err}", flush=True)
-                        except Exception as rel_err:
-                            print(f"⚠️ [RADIO] artist_related_artists falló: {rel_err}", flush=True)
+                                                    print(f"📻 [RADIO DEBUG] Añadido tema por género '{gen_name}': '{full_name}'", flush=True)
+                                                    if len(recommended_titles) >= 5:
+                                                        break
+                                    except Exception as gen_search_err:
+                                        print(f"⚠️ [RADIO] Búsqueda de track para género {gen_name} falló: {gen_search_err}", flush=True)
+                        except Exception as artist_info_err:
+                            print(f"⚠️ [RADIO] sp.artist falló al obtener géneros: {artist_info_err}", flush=True)
 
                     # Capa 3: Búsquedas de texto genéricas como fallback si aún no tenemos 5
                     if len(recommended_titles) < 5:
