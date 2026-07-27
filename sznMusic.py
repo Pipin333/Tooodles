@@ -147,28 +147,22 @@ class MusicCore(commands.Cog):
         song_info['origin'] = origin
         self.song_queue.append(song_info)
 
-        # Persistir solo la clave de búsqueda/ID de YouTube en la BD (nunca la URL expirables de Google Video)
         try:
             add_or_update_song(song_info['title'], song_info.get('id') or song_info['title'], duration=song_info.get('duration', 0))
         except Exception as e:
             print(f"⚠️ No se pudo guardar la canción en BD: {e}")
 
         await ctx.send(f"🎶 Añadido a la cola: **{song_info['title']}** ({self.format_duration(song_info.get('duration', 0))})")
-        if not self.current_song:
+
+        is_busy = self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused())
+        if not self.current_song and not is_busy:
             await self.play_next(ctx)
 
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
         self.is_loading_song = True
         try:
-            # Ejecutar extract_info asíncronamente
-            loop = asyncio.get_running_loop()
             info = await extract_info(query)
-
-            # Iniciar reproducción DE INMEDIATO (0ms de espera adicional)
             await self.add_song_dict(ctx, info, origin)
-
-            # Precargar chunk en segundo plano sin bloquear el arranque
-            self.bot.loop.create_task(prefetch_chunk(info))
         except Exception as e:
             print(f"❌ Error interno en la búsqueda/extracción: {e}", flush=True)
             await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
@@ -207,6 +201,9 @@ class MusicCore(commands.Cog):
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
 
     async def play_next(self, ctx):
+        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            return
+
         if not self.song_queue:
             if self.radio_mode and self.radio_seed_id:
                 await self.expand_radio_queue(ctx)
@@ -217,10 +214,6 @@ class MusicCore(commands.Cog):
 
         self.current_song = self.song_queue.pop(0)
 
-        # Disparar precarga del siguiente tema en la cola si existe
-        if self.song_queue:
-            self.bot.loop.create_task(prefetch_chunk(self.song_queue[0]))
-
         # Notificar a UI
         ui = self.bot.get_cog("MusicUI")
         if ui:
@@ -230,10 +223,7 @@ class MusicCore(commands.Cog):
         if musicdb:
             musicdb.log_song(self.current_song['title'])
 
-        # Determinar el target de audio para FFmpeg (Prefiere el archivo de caché parcial de 2MB o la URL directa)
-        target_path = self.current_song.get('cache_path')
-        if not target_path or not os.path.exists(target_path):
-            target_path = self.current_song.get('url')
+        target_path = self.current_song.get('url')
 
         before_opts = '-probesize 32k -analyzeduration 0'
         if target_path and target_path.startswith("http"):
@@ -243,7 +233,7 @@ class MusicCore(commands.Cog):
         def after_playing(error):
             if error:
                 print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
-            cleanup_cache(self.current_song)
+            self.current_song = None
             self.bot.loop.create_task(self.play_next(ctx))
 
         try:
