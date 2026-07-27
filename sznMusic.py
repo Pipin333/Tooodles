@@ -152,16 +152,27 @@ class MusicCore(commands.Cog):
     def schedule_queue_optimizations(self):
         """
         Estrategia Híbrida de Rendimiento:
-        - Canción 2 (Siguiente en cola): Precarga suave de 2MB a disco (throttled 64KB/20ms).
+        - Canción 2 (Siguiente en cola): Si no tiene URL, se resuelve en segundo plano y luego se precarga a disco.
         - Canciones 3 en adelante: Pre-resolución de URLs en segundo plano.
         """
         if not self.song_queue:
             return
 
+        # 1. Optimizar Canción 2 (siguiente en sonar)
         next_song = self.song_queue[0]
         if not next_song.get('cache_path'):
-            self.bot.loop.create_task(prefetch_chunk_throttled(next_song))
+            async def _optimize_next(s=next_song):
+                try:
+                    if not s.get('url'):
+                        resolved = await extract_info(s['title'])
+                        s.update(resolved)
+                    if s.get('url'):
+                        await prefetch_chunk_throttled(s)
+                except Exception as e:
+                    print(f"⚠️ Error optimizando siguiente canción en cola: {e}", flush=True)
+            self.bot.loop.create_task(_optimize_next())
 
+        # 2. Pre-resolver canciones 3 en adelante
         for song in self.song_queue[1:]:
             if not song.get('url'):
                 async def _preresolve(s=song):
