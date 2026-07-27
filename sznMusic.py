@@ -427,6 +427,7 @@ class MusicCore(commands.Cog):
             await ctx.send("⚠️ La cola está vacía.")
             return
         random.shuffle(self.song_queue)
+        self.schedule_queue_optimizations()
         await ctx.send("🔀 Cola de canciones mezclada aleatoriamente.")
 
     @commands.command()
@@ -437,6 +438,7 @@ class MusicCore(commands.Cog):
             return
         removed = self.song_queue.pop(index - 1)
         cleanup_cache(removed)
+        self.schedule_queue_optimizations()
         await ctx.send(f"🗑️ Canción eliminada de la cola: **{removed['title']}**")
 
     @commands.command()
@@ -447,6 +449,7 @@ class MusicCore(commands.Cog):
             return
         song = self.song_queue.pop(old_index - 1)
         self.song_queue.insert(new_index - 1, song)
+        self.schedule_queue_optimizations()
         await ctx.send(f"↕️ **{song['title']}** movida de la posición {old_index} a la {new_index}.")
 
     @commands.command()
