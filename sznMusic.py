@@ -174,7 +174,14 @@ class MusicCore(commands.Cog):
 
     async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada"):
         song_info['origin'] = origin
-        self.song_queue.append(song_info)
+        
+        # Insertar canciones del usuario antes de las canciones recomendadas por la radio
+        insert_idx = len(self.song_queue)
+        for idx, song in enumerate(self.song_queue):
+            if song.get('origin') == "📻 Radio Automática":
+                insert_idx = idx
+                break
+        self.song_queue.insert(insert_idx, song_info)
 
         try:
             add_or_update_song(song_info['title'], song_info.get('id') or song_info['title'], duration=song_info.get('duration', 0))
@@ -244,7 +251,13 @@ class MusicCore(commands.Cog):
                     'uploader': track['artists'][0]['name'],
                     'origin': f"🎵 Playlist por {ctx.author.name}"
                 }
-                self.song_queue.append(song_dict)
+                # Insertar canciones del usuario antes de las canciones recomendadas por la radio
+                insert_idx = len(self.song_queue)
+                for idx, song in enumerate(self.song_queue):
+                    if song.get('origin') == "📻 Radio Automática":
+                        insert_idx = idx
+                        break
+                self.song_queue.insert(insert_idx, song_dict)
 
             # 3. Disparar pre-resolución de los siguientes temas en segundo plano
             self.schedule_queue_optimizations()
@@ -739,6 +752,7 @@ class MusicCore(commands.Cog):
             await self.voice_client.disconnect()
             self.voice_client = None
             self.current_song = None
+            self.radio_mode = False
             cleanup_cache()
             print("✅ Desconectado por inactividad.", flush=True)
 
@@ -753,6 +767,10 @@ class MusicCore(commands.Cog):
 
         if not self.current_song and not self.song_queue:
             await ctx.send("⚠️ Debe haber una canción reproduciéndose o en cola para iniciar el modo radio.")
+            return
+
+        if getattr(self, 'radio_mode', False):
+            await ctx.send("📻 El modo radio ya está activo.")
             return
 
         self.radio_mode = True
