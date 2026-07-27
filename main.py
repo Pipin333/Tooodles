@@ -32,9 +32,20 @@ async def main():
     print("🚀 Inicializando Tooodles Bot...")
     setup_database()
 
-    cookies = load_config("cookies")
+    cookies = None
+    if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 50:
+        print("📄 Cargando cookies desde archivo local cookies.txt...")
+        try:
+            with open("cookies.txt", "r", encoding="utf-8") as f:
+                cookies = f.read()
+        except Exception as e:
+            print(f"⚠️ Error al leer cookies.txt: {e}")
+
     if not cookies:
-        print("🔑 Cookies no encontradas en BD. Generando automáticamente vía Playwright Stealth...")
+        cookies = load_config("cookies")
+
+    if not cookies:
+        print("🔑 Cookies no encontradas en BD ni en cookies.txt. Generando vía Playwright Stealth...")
         cookies = await fetch_stealth_cookies()
 
     if cookies:
