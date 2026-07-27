@@ -236,11 +236,10 @@ class MusicCore(commands.Cog):
         if not target_path or not os.path.exists(target_path):
             target_path = self.current_song.get('url')
 
+        before_opts = '-probesize 32k -analyzeduration 0'
         if target_path and target_path.startswith("http"):
-            ffmpeg_before_options = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
-        else:
-            ffmpeg_before_options = ''
-        ffmpeg_options = '-vn'
+            before_opts += ' -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+        ffmpeg_options = '-vn -threads 2'
 
         def after_playing(error):
             if error:
@@ -248,15 +247,22 @@ class MusicCore(commands.Cog):
             cleanup_cache(self.current_song)
             self.bot.loop.create_task(self.play_next(ctx))
 
-        if self.voice_client and self.voice_client.is_connected():
-            self.voice_client.play(
-                discord.FFmpegPCMAudio(
-                    target_path,
-                    before_options=ffmpeg_before_options,
-                    options=ffmpeg_options
-                ),
-                after=after_playing
+        try:
+            audio_source = await discord.FFmpegOpusAudio.from_probe(
+                target_path,
+                before_options=before_opts,
+                options=ffmpeg_options
             )
+        except Exception as opus_err:
+            print(f"ℹ️ Opus probe fallback to PCMAudio: {opus_err}", flush=True)
+            audio_source = discord.FFmpegPCMAudio(
+                target_path,
+                before_options=before_opts,
+                options=ffmpeg_options
+            )
+
+        if self.voice_client and self.voice_client.is_connected():
+            self.voice_client.play(audio_source, after=after_playing)
         else:
             await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
 
