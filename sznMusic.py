@@ -221,12 +221,34 @@ class MusicCore(commands.Cog):
             playlist_id = url.split("/")[-1].split("?")[0]
             results = self.sp.playlist_tracks(playlist_id)
             items = results.get('items', [])
-            await ctx.send(f"🔄 Cargando playlist de Spotify ({len(items)} canciones)...")
-            for item in items:
-                track = item.get('track')
-                if track:
-                    query = f"{track['name']} {track['artists'][0]['name']}"
-                    await self.add_from_youtube(ctx, query, origin=f"🎵 Playlist por {ctx.author.name}")
+            if not items:
+                await ctx.send("📭 La playlist de Spotify está vacía.")
+                return
+
+            valid_items = [i for i in items if i.get('track')]
+            await ctx.send(f"⚡ Carga ultrarrápida de playlist Spotify ({len(valid_items)} canciones)...")
+
+            # 1. Resolver y reproducir el tema 1 de inmediato (<400ms)
+            first_track = valid_items[0]['track']
+            first_query = f"{first_track['name']} {first_track['artists'][0]['name']}"
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist por {ctx.author.name}")
+
+            # 2. Agregar los temas restantes 2..N a la cola de forma instantánea
+            for item in valid_items[1:]:
+                track = item['track']
+                title = f"{track['name']} - {track['artists'][0]['name']}"
+                song_dict = {
+                    'title': title,
+                    'url': None,
+                    'duration': int(track.get('duration_ms', 0) / 1000),
+                    'uploader': track['artists'][0]['name'],
+                    'origin': f"🎵 Playlist por {ctx.author.name}"
+                }
+                self.song_queue.append(song_dict)
+
+            # 3. Disparar pre-resolución de los siguientes temas en segundo plano
+            self.schedule_queue_optimizations()
+
         except Exception as e:
             print(f"❌ Error al procesar playlist de Spotify: {e}", flush=True)
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
@@ -256,6 +278,15 @@ class MusicCore(commands.Cog):
 
         # Ejecutar estrategia de optimización para los siguientes temas en la cola
         self.schedule_queue_optimizations()
+
+        if not self.current_song.get('url') and not self.current_song.get('cache_path'):
+            try:
+                resolved = await extract_info(self.current_song['title'])
+                self.current_song.update(resolved)
+            except Exception as e:
+                print(f"⚠️ Error al resolver tema de cola: {e}", flush=True)
+                self.current_song = None
+                return await self.play_next(ctx)
 
         target_path = self.current_song.get('cache_path')
         if not target_path or not os.path.exists(target_path):
