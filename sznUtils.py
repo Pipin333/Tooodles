@@ -366,7 +366,7 @@ async def extract_info(query: str) -> dict:
                 "quiet": True,
                 "nocheckcertificate": True,
                 "cookiefile": cookie_path,
-                "js_runtimes": ["node"],
+                "js_runtimes": {"node": {}},
                 "remote_components": ["ejs:github"],
                 "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
             }
