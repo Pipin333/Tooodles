@@ -330,7 +330,7 @@ class MusicCore(commands.Cog):
                 await ctx.send("⚠️ No hay canciones en la base de datos para generar la radio.")
                 self.radio_mode = False
                 return
-            song_dicts = [{'id': s.youtube_id, 'title': s.title, 'duration': s.duration} for s in songs]
+            song_dicts = [{'id': getattr(s, 'url', s.id), 'title': s.title, 'duration': s.duration} for s in songs]
 
         selected = random.choice(song_dicts)
         await ctx.send(f"📻 Radio Automática: **{selected['title']}**")
