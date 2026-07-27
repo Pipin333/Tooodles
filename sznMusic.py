@@ -257,17 +257,14 @@ class MusicCore(commands.Cog):
         if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
             return
 
+        # Si el modo radio está activo y la cola tiene menos de 2 canciones, rellenar 5 más automáticamente
+        if getattr(self, 'radio_mode', False) and len(self.song_queue) < 2:
+            await self.expand_radio_queue(ctx)
+
         if not self.song_queue:
-            if self.radio_mode and self.radio_seed_id:
-                success = await self.expand_radio_queue(ctx)
-                if not success or not self.song_queue:
-                    await ctx.send("📭 La cola de canciones está vacía.")
-                    self.current_song = None
-                    return
-            else:
-                await ctx.send("📭 La cola de canciones está vacía.")
-                self.current_song = None
-                return
+            await ctx.send("📭 La cola de canciones está vacía.")
+            self.current_song = None
+            return
 
         self.current_song = self.song_queue.pop(0)
 
@@ -309,7 +306,7 @@ class MusicCore(commands.Cog):
                 if not hasattr(self, 'radio_history'):
                     self.radio_history = []
                 self.radio_history.append(self.current_song['title'].lower())
-                if len(self.radio_history) > 15:
+                if len(self.radio_history) > 30:
                     self.radio_history.pop(0)
             cleanup_cache(self.current_song)
             self.current_song = None
@@ -335,14 +332,20 @@ class MusicCore(commands.Cog):
             await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
 
     async def expand_radio_queue(self, ctx, seed_id: str | None = None, seed_title: str | None = None) -> bool:
-        recommended_title = None
+        """
+        Genera 5 canciones recomendadas distintas en lote y las añade a la cola.
+        """
+        if not hasattr(self, 'radio_history'):
+            self.radio_history = []
 
         target_seed = seed_id or getattr(self, 'radio_seed_id', None)
         target_title = seed_title or getattr(self, 'last_played_title', None)
         if not target_title and self.current_song:
             target_title = self.current_song.get('title')
 
-        # 1. Recomendaciones de Spotify si está configurada la API
+        recommended_titles = []
+
+        # 1. Buscar vía API de Spotify si está disponible
         if self.sp:
             try:
                 if not target_seed and target_title:
@@ -351,54 +354,55 @@ class MusicCore(commands.Cog):
                         target_seed = results['tracks']['items'][0]['id']
 
                 if target_seed:
-                    recs = self.sp.recommendations(seed_tracks=[target_seed], limit=15)
+                    recs = self.sp.recommendations(seed_tracks=[target_seed], limit=20)
                     tracks = recs.get('tracks', [])
-                    recent_titles = [t.lower() for t in getattr(self, 'radio_history', [])]
-                    
-                    valid_recs = []
                     for t in tracks:
-                        full_name = f"{t['name']} {t['artists'][0]['name']}"
-                        if not any(h in full_name.lower() for h in recent_titles):
-                            valid_recs.append(full_name)
-
-                    if valid_recs:
-                        recommended_title = random.choice(valid_recs)
+                        full_name = f"{t['name']} - {t['artists'][0]['name']}"
+                        clean_name = full_name.lower()
+                        if not any(h in clean_name for h in self.radio_history) and full_name not in recommended_titles:
+                            recommended_titles.append(full_name)
+                            if len(recommended_titles) >= 5:
+                                break
             except Exception as sp_err:
                 print(f"ℹ️ Recomendaciones Spotify radio note: {sp_err}", flush=True)
 
-        # 2. Fallback a canciones históricas de la BD (con filtro de historial reciente)
-        if not recommended_title:
+        # 2. Fallback: Usar canciones registradas en la Base de Datos (orden aleatorio)
+        if len(recommended_titles) < 5:
             with get_db_session() as session:
                 songs = session.query(Song).all()
-                if not songs:
-                    await ctx.send("⚠️ No hay canciones registradas en la base de datos para la radio.")
-                    self.radio_mode = False
-                    return False
-                
-                recent_titles = [t.lower() for t in getattr(self, 'radio_history', [])]
-                candidates = [s for s in songs if not any(h in s.title.lower() for h in recent_titles)]
-                if not candidates and target_title:
-                    candidates = [s for s in songs if s.title.lower() != target_title.lower()]
+                if songs:
+                    shuffled_db = list(songs)
+                    random.shuffle(shuffled_db)
+                    for s in shuffled_db:
+                        clean_name = s.title.lower()
+                        if not any(h in clean_name for h in self.radio_history) and s.title not in recommended_titles:
+                            recommended_titles.append(s.title)
+                            if len(recommended_titles) >= 5:
+                                break
 
-                selected = random.choice(candidates) if candidates else random.choice(songs)
-                recommended_title = selected.title
+        if not recommended_titles:
+            await ctx.send("⚠️ No se pudieron generar recomendaciones para la radio.")
+            self.radio_mode = False
+            return False
 
-        await ctx.send(f"📻 Radio Automática: **{recommended_title}**")
-        try:
-            info = await extract_info(recommended_title)
-            info['origin'] = "📻 Radio Automática"
+        await ctx.send(f"📻 **Radio Automática**: Añadidos **{len(recommended_titles)}** temas sugeridos a la cola.")
 
-            if not hasattr(self, 'radio_history'):
-                self.radio_history = []
-            self.radio_history.append(recommended_title.lower())
-            if len(self.radio_history) > 15:
+        for title in recommended_titles:
+            self.radio_history.append(title.lower())
+            if len(self.radio_history) > 30:
                 self.radio_history.pop(0)
 
-            self.song_queue.append(info)
-            return True
-        except Exception as e:
-            print(f"⚠️ Error al extraer canción para radio: {e}", flush=True)
-            return False
+            song_dict = {
+                'title': title,
+                'url': None,
+                'duration': 0,
+                'uploader': 'Radio Automática',
+                'origin': '📻 Radio Automática'
+            }
+            self.song_queue.append(song_dict)
+
+        self.schedule_queue_optimizations()
+        return True
 
     # ==============================================================================
     # COMANDOS DE DISCORD
@@ -476,6 +480,7 @@ class MusicCore(commands.Cog):
     async def stop(self, ctx):
         """Detiene la música y limpia la cola."""
         self.song_queue.clear()
+        self.radio_mode = False
         cleanup_cache()
         if self.voice_client:
             self.voice_client.stop()
@@ -525,8 +530,6 @@ class MusicCore(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
 
-
-
     @tasks.loop(seconds=120)
     async def inactivity_check(self):
         if getattr(self, 'is_loading_song', False):
@@ -539,27 +542,27 @@ class MusicCore(commands.Cog):
             print("✅ Desconectado por inactividad.", flush=True)
 
     @commands.command()
-    async def radio(self, ctx, *, arg: str = "0.75"):
+    async def radio(self, ctx, *, arg: str = "on"):
         """Activa o desactiva el modo radio automática."""
-        if arg.lower() == "off":
+        if arg.lower() in ("off", "stop", "desactivar"):
             self.radio_mode = False
             self.radio_seed_id = None
             await ctx.send("🛑 Modo radio desactivado.")
             return
 
-        try:
-            self.radio_temperature = float(arg)
-        except ValueError:
-            await ctx.send("❌ Parámetro inválido. Usa un número entre 0.0 y 1.0 o 'off'.")
-            return
-
-        if not self.current_song:
-            await ctx.send("⚠️ No hay ninguna canción reproduciéndose para iniciar el modo radio.")
+        if not self.current_song and not self.song_queue:
+            await ctx.send("⚠️ Debe haber una canción reproduciéndose o en cola para iniciar el modo radio.")
             return
 
         self.radio_mode = True
-        self.radio_seed_id = self.current_song.get('id', self.current_song['title'])
-        await ctx.send(f"📻 Modo radio activado con temperatura {self.radio_temperature}.")
+        if self.current_song:
+            self.last_played_title = self.current_song.get('title')
+
+        await ctx.send("📻 **Modo radio activado**. Se generarán 5 recomendaciones a la cola.")
+        await self.expand_radio_queue(ctx)
+
+        if self.voice_client and not self.voice_client.is_playing() and not self.voice_client.is_paused():
+            await self.play_next(ctx)
 
 async def setup(bot):
     await bot.add_cog(MusicCore(bot))
