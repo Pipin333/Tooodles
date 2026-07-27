@@ -360,13 +360,15 @@ async def extract_info(query: str) -> dict:
     if cookie_path:
         try:
             from yt_dlp import YoutubeDL
+            import shutil
+            node_path = shutil.which("node") or shutil.which("nodejs") or "/usr/bin/node"
             ydl_opts = {
                 "format": "bestaudio/best/ba",
                 "noplaylist": True,
                 "quiet": True,
                 "nocheckcertificate": True,
                 "cookiefile": cookie_path,
-                "js_runtimes": {"node": {}},
+                "js_runtimes": {"node": {"path": node_path}},
                 "remote_components": ["ejs:github"],
                 "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
             }

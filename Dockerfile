@@ -5,6 +5,7 @@ ENV PYTHONUNBUFFERED=1
 # Instala FFmpeg y paquetes de sistema
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg nodejs && \
+    (ln -sf /usr/bin/nodejs /usr/bin/node 2>/dev/null || true) && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
