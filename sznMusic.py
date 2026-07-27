@@ -328,18 +328,40 @@ class MusicCore(commands.Cog):
             await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
 
     async def expand_radio_queue(self, ctx) -> bool:
-        with get_db_session() as session:
-            songs = session.query(Song).all()
-            if not songs:
-                await ctx.send("⚠️ No hay canciones en la base de datos para generar la radio.")
-                self.radio_mode = False
-                return False
-            song_dicts = [{'id': getattr(s, 'url', s.id), 'title': s.title, 'duration': s.duration} for s in songs]
+        recommended_title = None
 
-        selected = random.choice(song_dicts)
-        await ctx.send(f"📻 Radio Automática: **{selected['title']}**")
+        # 1. Recomendaciones de Spotify si está configurada la API
+        if self.sp and self.current_song:
+            try:
+                curr_title = self.current_song['title']
+                results = self.sp.search(q=curr_title, type='track', limit=1)
+                if results and results.get('tracks', {}).get('items'):
+                    seed_id = results['tracks']['items'][0]['id']
+                    recs = self.sp.recommendations(seed_tracks=[seed_id], limit=10)
+                    tracks = recs.get('tracks', [])
+                    valid_recs = [f"{t['name']} {t['artists'][0]['name']}" for t in tracks if t['name'].lower() not in curr_title.lower()]
+                    if valid_recs:
+                        recommended_title = random.choice(valid_recs)
+            except Exception as sp_err:
+                print(f"ℹ️ Recomendaciones Spotify radio note: {sp_err}", flush=True)
+
+        # 2. Fallback a canciones históricas de la BD (con filtro para no repetir la canción actual)
+        if not recommended_title:
+            with get_db_session() as session:
+                songs = session.query(Song).all()
+                if not songs:
+                    await ctx.send("⚠️ No hay canciones registradas en la base de datos para la radio.")
+                    self.radio_mode = False
+                    return False
+                
+                curr_title = self.current_song['title'].lower() if self.current_song else ""
+                candidates = [s for s in songs if s.title.lower() != curr_title]
+                selected = random.choice(candidates) if candidates else random.choice(songs)
+                recommended_title = selected.title
+
+        await ctx.send(f"📻 Radio Automática: **{recommended_title}**")
         try:
-            info = await extract_info(selected['title'])
+            info = await extract_info(recommended_title)
             info['origin'] = "📻 Radio Automática"
             self.song_queue.append(info)
             return True
