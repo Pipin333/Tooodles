@@ -149,6 +149,10 @@ class MusicDB(commands.Cog):
             await ctx.send("❌ Módulo de música no encontrado.")
             return
 
+        vc = await core.connect_to_voice(ctx)
+        if not vc:
+            return
+
         members = ctx.author.voice.channel.members
         user_ids = [str(m.id) for m in members if not m.bot]
         liked_songs = self.get_liked_songs_by_users(user_ids)
@@ -163,7 +167,11 @@ class MusicDB(commands.Cog):
                 results = core.sp.search(q=title, type='track', limit=1)
                 if results and results.get('tracks', {}).get('items'):
                     seed_id = results['tracks']['items'][0]['id']
-                    await core.expand_radio_queue(ctx, seed_id, temperatura)
+                    core.radio_mode = True
+                    core.radio_seed_id = seed_id
+                    await core.expand_radio_queue(ctx, seed_id=seed_id)
+                    if not core.current_song and core.voice_client and not core.voice_client.is_playing():
+                        await core.play_next(ctx)
                     break
             else:
                 await ctx.send("⚠️ No se pudo generar recomendaciones basadas en el top global.")
@@ -174,12 +182,16 @@ class MusicDB(commands.Cog):
             return
 
         await ctx.send("🎧 Generando radio emocional colectiva...")
-        for song in liked_songs[:5]:
-            results = core.sp.search(q=song.title, type='track', limit=1)
-            if results and results.get('tracks', {}).get('items'):
-                seed_id = results['tracks']['items'][0]['id']
-                await core.expand_radio_queue(ctx, seed_id, temperatura)
-                break
+        import random
+        random_song = random.choice(liked_songs)
+        results = core.sp.search(q=random_song.title, type='track', limit=1)
+        if results and results.get('tracks', {}).get('items'):
+            seed_id = results['tracks']['items'][0]['id']
+            core.radio_mode = True
+            core.radio_seed_id = seed_id
+            await core.expand_radio_queue(ctx, seed_id=seed_id)
+            if not core.current_song and core.voice_client and not core.voice_client.is_playing():
+                await core.play_next(ctx)
         else:
             await ctx.send("⚠️ No se pudo generar recomendaciones basadas en canciones favoritas.")
 

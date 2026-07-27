@@ -327,19 +327,25 @@ class MusicCore(commands.Cog):
         else:
             await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
 
-    async def expand_radio_queue(self, ctx) -> bool:
+    async def expand_radio_queue(self, ctx, seed_id: str | None = None, seed_title: str | None = None) -> bool:
         recommended_title = None
 
         # 1. Recomendaciones de Spotify si está configurada la API
-        if self.sp and self.current_song:
+        if self.sp:
             try:
-                curr_title = self.current_song['title']
-                results = self.sp.search(q=curr_title, type='track', limit=1)
-                if results and results.get('tracks', {}).get('items'):
-                    seed_id = results['tracks']['items'][0]['id']
-                    recs = self.sp.recommendations(seed_tracks=[seed_id], limit=10)
+                target_seed = seed_id
+                target_title = seed_title or (self.current_song['title'] if self.current_song else None)
+
+                if not target_seed and target_title:
+                    results = self.sp.search(q=target_title, type='track', limit=1)
+                    if results and results.get('tracks', {}).get('items'):
+                        target_seed = results['tracks']['items'][0]['id']
+
+                if target_seed:
+                    recs = self.sp.recommendations(seed_tracks=[target_seed], limit=10)
                     tracks = recs.get('tracks', [])
-                    valid_recs = [f"{t['name']} {t['artists'][0]['name']}" for t in tracks if t['name'].lower() not in curr_title.lower()]
+                    curr_name = target_title.lower() if target_title else ""
+                    valid_recs = [f"{t['name']} {t['artists'][0]['name']}" for t in tracks if t['name'].lower() not in curr_name]
                     if valid_recs:
                         recommended_title = random.choice(valid_recs)
             except Exception as sp_err:
