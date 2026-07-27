@@ -304,6 +304,13 @@ class MusicCore(commands.Cog):
         def after_playing(error):
             if error:
                 print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+            if self.current_song and self.current_song.get('title'):
+                self.last_played_title = self.current_song['title']
+                if not hasattr(self, 'radio_history'):
+                    self.radio_history = []
+                self.radio_history.append(self.current_song['title'].lower())
+                if len(self.radio_history) > 15:
+                    self.radio_history.pop(0)
             cleanup_cache(self.current_song)
             self.current_song = None
             self.bot.loop.create_task(self.play_next(ctx))
@@ -330,28 +337,36 @@ class MusicCore(commands.Cog):
     async def expand_radio_queue(self, ctx, seed_id: str | None = None, seed_title: str | None = None) -> bool:
         recommended_title = None
 
+        target_seed = seed_id or getattr(self, 'radio_seed_id', None)
+        target_title = seed_title or getattr(self, 'last_played_title', None)
+        if not target_title and self.current_song:
+            target_title = self.current_song.get('title')
+
         # 1. Recomendaciones de Spotify si está configurada la API
         if self.sp:
             try:
-                target_seed = seed_id
-                target_title = seed_title or (self.current_song['title'] if self.current_song else None)
-
                 if not target_seed and target_title:
                     results = self.sp.search(q=target_title, type='track', limit=1)
                     if results and results.get('tracks', {}).get('items'):
                         target_seed = results['tracks']['items'][0]['id']
 
                 if target_seed:
-                    recs = self.sp.recommendations(seed_tracks=[target_seed], limit=10)
+                    recs = self.sp.recommendations(seed_tracks=[target_seed], limit=15)
                     tracks = recs.get('tracks', [])
-                    curr_name = target_title.lower() if target_title else ""
-                    valid_recs = [f"{t['name']} {t['artists'][0]['name']}" for t in tracks if t['name'].lower() not in curr_name]
+                    recent_titles = [t.lower() for t in getattr(self, 'radio_history', [])]
+                    
+                    valid_recs = []
+                    for t in tracks:
+                        full_name = f"{t['name']} {t['artists'][0]['name']}"
+                        if not any(h in full_name.lower() for h in recent_titles):
+                            valid_recs.append(full_name)
+
                     if valid_recs:
                         recommended_title = random.choice(valid_recs)
             except Exception as sp_err:
                 print(f"ℹ️ Recomendaciones Spotify radio note: {sp_err}", flush=True)
 
-        # 2. Fallback a canciones históricas de la BD (con filtro para no repetir la canción actual)
+        # 2. Fallback a canciones históricas de la BD (con filtro de historial reciente)
         if not recommended_title:
             with get_db_session() as session:
                 songs = session.query(Song).all()
@@ -360,8 +375,11 @@ class MusicCore(commands.Cog):
                     self.radio_mode = False
                     return False
                 
-                curr_title = self.current_song['title'].lower() if self.current_song else ""
-                candidates = [s for s in songs if s.title.lower() != curr_title]
+                recent_titles = [t.lower() for t in getattr(self, 'radio_history', [])]
+                candidates = [s for s in songs if not any(h in s.title.lower() for h in recent_titles)]
+                if not candidates and target_title:
+                    candidates = [s for s in songs if s.title.lower() != target_title.lower()]
+
                 selected = random.choice(candidates) if candidates else random.choice(songs)
                 recommended_title = selected.title
 
@@ -369,6 +387,13 @@ class MusicCore(commands.Cog):
         try:
             info = await extract_info(recommended_title)
             info['origin'] = "📻 Radio Automática"
+
+            if not hasattr(self, 'radio_history'):
+                self.radio_history = []
+            self.radio_history.append(recommended_title.lower())
+            if len(self.radio_history) > 15:
+                self.radio_history.pop(0)
+
             self.song_queue.append(info)
             return True
         except Exception as e:
