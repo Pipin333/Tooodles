@@ -266,15 +266,20 @@ class MusicCore(commands.Cog):
             self.current_song = None
             return
 
-        self.current_song = self.song_queue.pop(0)
+        next_item = self.song_queue.pop(0)
+        if not next_item or not isinstance(next_item, dict):
+            self.current_song = None
+            return await self.play_next(ctx)
+
+        self.current_song = next_item
 
         # Notificar a UI
         ui = self.bot.get_cog("MusicUI")
-        if ui:
+        if ui and self.current_song.get('title'):
             await ui.notify_now_playing(ctx, self.current_song['title'], self.current_song.get('origin'))
 
         musicdb = getattr(self.bot, "musicdb", None)
-        if musicdb:
+        if musicdb and self.current_song.get('title'):
             musicdb.log_song(self.current_song['title'])
 
         # Ejecutar estrategia de optimización para los siguientes temas en la cola
@@ -282,8 +287,11 @@ class MusicCore(commands.Cog):
 
         if not self.current_song.get('url') and not self.current_song.get('cache_path'):
             try:
-                resolved = await extract_info(self.current_song['title'])
-                self.current_song.update(resolved)
+                resolved = await extract_info(self.current_song.get('title', ''))
+                if resolved:
+                    self.current_song.update(resolved)
+                else:
+                    raise RuntimeError("Failed to resolve stream url.")
             except Exception as e:
                 print(f"⚠️ Error al resolver tema de cola: {e}", flush=True)
                 self.current_song = None
@@ -559,8 +567,22 @@ class MusicCore(commands.Cog):
     def _radio_is_unique(self, candidate: str, recommended: list, queued: list) -> bool:
         """Verifica que un candidato no sea duplicado del historial, cola actual ni recomendaciones ya elegidas."""
         c_lower = candidate.lower()
+
+        # Filtrar audiolibros, podcasts, capítulos y ruido no musical
+        junk_keywords = [
+            "chapter", "episode", "audiobook", "audio book", "podcast",
+            "imagination audio", "volume", "vol.", "track", "intro",
+            "outro", "skit", "interlude", "remastered"
+        ]
+        if any(jk in c_lower for jk in junk_keywords):
+            # Si el track es numérico simple como "Chapter 5" o similar, lo descartamos
+            return False
+
         # Extraer solo el nombre de la canción (antes del " - ")
         c_song_name = c_lower.split(" - ")[0].strip() if " - " in c_lower else c_lower
+
+        if c_song_name.isdigit():
+            return False
 
         # Verificar contra historial de radio
         for h in self.radio_history:
