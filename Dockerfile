@@ -2,10 +2,11 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 
-# Instala FFmpeg y paquetes de sistema
+# Instala FFmpeg, Curl y Node.js 22.x (Requerido por yt-dlp EJS solver >= 22.0.0)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg nodejs && \
-    (ln -sf /usr/bin/nodejs /usr/bin/node 2>/dev/null || true) && \
+    apt-get install -y --no-install-recommends ffmpeg curl ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
