@@ -14,10 +14,11 @@ from sznUtils import extract_info, fetch_stealth_cookies
 SPOTIFY_CLIENT_ID = os.getenv('client_id')
 SPOTIFY_CLIENT_SECRET = os.getenv('client_secret')
 
-async def prefetch_chunk(song_info: dict) -> str | None:
+async def prefetch_chunk_throttled(song_info: dict) -> str | None:
     """
-    Descarga los primeros 2 MB (bytes=0-2097152) del stream de audio a /tmp/cache_{id}.webm
-    para garantizar 0ms de latencia inicial al reproducir en FFmpeg.
+    Descarga los primeros 2 MB del stream de audio a /tmp/cache_{id}.webm
+    en bloques pequeños de 64 KB con micro-pausas (throttling) para NO saturar
+    la CPU ni el socket de red durante la reproducción actual.
     """
     song_id = song_info.get('id')
     stream_url = song_info.get('url')
@@ -25,7 +26,8 @@ async def prefetch_chunk(song_info: dict) -> str | None:
         return None
 
     cache_path = os.path.join(tempfile.gettempdir(), f"cache_{song_id}.webm")
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) >= 2000000:
+        song_info['cache_path'] = cache_path
         return cache_path
 
     headers = {
@@ -37,15 +39,19 @@ async def prefetch_chunk(song_info: dict) -> str | None:
         import aiohttp
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-            async with session.get(stream_url, timeout=5) as resp:
+            async with session.get(stream_url, timeout=10) as resp:
                 if resp.status in (200, 206):
-                    content = await resp.read()
                     with open(cache_path, "wb") as f:
-                        f.write(content)
-                    print(f"⚡ Chunk de 2MB precargado en caché: {cache_path}", flush=True)
-                    return cache_path
+                        async for chunk in resp.content.iter_chunked(65536):
+                            f.write(chunk)
+                            await asyncio.sleep(0.02)  # Micro-pausa de 20ms para ceder CPU al event loop
+
+                    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                        song_info['cache_path'] = cache_path
+                        print(f"⚡ Chunk de 2MB precargado suavemente en caché: {cache_path}", flush=True)
+                        return cache_path
     except Exception as e:
-        print(f"⚠️ Error al precargar chunk para {song_id}: {e}", flush=True)
+        print(f"ℹ️ Precarga suave omitida para {song_id}: {e}", flush=True)
 
     return None
 
@@ -143,6 +149,29 @@ class MusicCore(commands.Cog):
             await ctx.send("❌ Error al conectar al canal de voz.")
             return None
 
+    def schedule_queue_optimizations(self):
+        """
+        Estrategia Híbrida de Rendimiento:
+        - Canción 2 (Siguiente en cola): Precarga suave de 2MB a disco (throttled 64KB/20ms).
+        - Canciones 3 en adelante: Pre-resolución de URLs en segundo plano.
+        """
+        if not self.song_queue:
+            return
+
+        next_song = self.song_queue[0]
+        if not next_song.get('cache_path'):
+            self.bot.loop.create_task(prefetch_chunk_throttled(next_song))
+
+        for song in self.song_queue[1:]:
+            if not song.get('url'):
+                async def _preresolve(s=song):
+                    try:
+                        resolved = await extract_info(s['title'])
+                        s.update(resolved)
+                    except Exception:
+                        pass
+                self.bot.loop.create_task(_preresolve())
+
     async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada"):
         song_info['origin'] = origin
         self.song_queue.append(song_info)
@@ -157,6 +186,8 @@ class MusicCore(commands.Cog):
         is_busy = self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused())
         if not self.current_song and not is_busy:
             await self.play_next(ctx)
+        else:
+            self.schedule_queue_optimizations()
 
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
         self.is_loading_song = True
@@ -223,7 +254,12 @@ class MusicCore(commands.Cog):
         if musicdb:
             musicdb.log_song(self.current_song['title'])
 
-        target_path = self.current_song.get('url')
+        # Ejecutar estrategia de optimización para los siguientes temas en la cola
+        self.schedule_queue_optimizations()
+
+        target_path = self.current_song.get('cache_path')
+        if not target_path or not os.path.exists(target_path):
+            target_path = self.current_song.get('url')
 
         before_opts = '-probesize 32k -analyzeduration 0'
         if target_path and target_path.startswith("http"):
@@ -233,6 +269,7 @@ class MusicCore(commands.Cog):
         def after_playing(error):
             if error:
                 print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+            cleanup_cache(self.current_song)
             self.current_song = None
             self.bot.loop.create_task(self.play_next(ctx))
 
