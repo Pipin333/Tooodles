@@ -1,5 +1,6 @@
 discord.py>=2.3.2
-yt_dlp
+yt_dlp[default]
+yt-dlp-ejs
 aiohttp
 pynacl
 spotipy
