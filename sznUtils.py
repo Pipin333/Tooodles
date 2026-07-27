@@ -362,12 +362,12 @@ async def extract_info(query: str) -> dict:
         try:
             from yt_dlp import YoutubeDL
             ydl_opts = {
-                "format": "bestaudio/best",
+                "format": "bestaudio/best/ba",
                 "noplaylist": True,
                 "quiet": True,
                 "nocheckcertificate": True,
                 "cookiefile": cookie_path,
-                "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}}
+                "extractor_args": {"youtube": {"player_client": ["mweb", "web", "tv"]}}
             }
             def _yt_with_cookies():
                 with YoutubeDL(ydl_opts) as ydl:
@@ -411,7 +411,7 @@ async def extract_info(query: str) -> dict:
     try:
         from yt_dlp import YoutubeDL
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio/best/ba",
             "noplaylist": True,
             "quiet": True,
             "nocheckcertificate": True,
