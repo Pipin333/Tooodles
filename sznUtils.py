@@ -362,12 +362,12 @@ async def extract_info(query: str) -> dict:
         try:
             from yt_dlp import YoutubeDL
             ydl_opts = {
-                "format": "bestaudio/best/ba",
+                "format": "bestaudio/best/ba/ba*",
                 "noplaylist": True,
                 "quiet": True,
                 "nocheckcertificate": True,
                 "cookiefile": cookie_path,
-                "extractor_args": {"youtube": {"player_client": ["mweb", "web", "tv"]}}
+                "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
             }
             def _yt_with_cookies():
                 with YoutubeDL(ydl_opts) as ydl:
@@ -379,9 +379,14 @@ async def extract_info(query: str) -> dict:
                 stream_url = entry.get('url')
                 formats = entry.get('formats', [])
                 if not stream_url and formats:
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                    if audio_formats:
-                        stream_url = audio_formats[-1]['url']
+                    valid_audio = [f for f in formats if f.get('url') and f.get('acodec') != 'none']
+                    if valid_audio:
+                        best_valid = sorted(valid_audio, key=lambda x: int(x.get('tbr') or x.get('bitrate') or 0), reverse=True)[0]
+                        stream_url = best_valid['url']
+                    else:
+                        any_valid = [f for f in formats if f.get('url')]
+                        if any_valid:
+                            stream_url = any_valid[-1]['url']
 
                 if stream_url:
                     print(f"✅ Stream resuelto vía yt-dlp con cookies: {entry.get('title')}", flush=True)
