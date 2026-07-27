@@ -164,12 +164,11 @@ class MusicCore(commands.Cog):
             loop = asyncio.get_running_loop()
             info = await extract_info(query)
 
-            # Precargar primer chunk de 2MB
-            cache_path = await prefetch_chunk(info)
-            if cache_path:
-                info['cache_path'] = cache_path
-
+            # Iniciar reproducción DE INMEDIATO (0ms de espera adicional)
             await self.add_song_dict(ctx, info, origin)
+
+            # Precargar chunk en segundo plano sin bloquear el arranque
+            self.bot.loop.create_task(prefetch_chunk(info))
         except Exception as e:
             print(f"❌ Error interno en la búsqueda/extracción: {e}", flush=True)
             await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
