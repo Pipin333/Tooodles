@@ -259,7 +259,11 @@ class MusicCore(commands.Cog):
 
         if not self.song_queue:
             if self.radio_mode and self.radio_seed_id:
-                await self.expand_radio_queue(ctx)
+                success = await self.expand_radio_queue(ctx)
+                if not success or not self.song_queue:
+                    await ctx.send("📭 La cola de canciones está vacía.")
+                    self.current_song = None
+                    return
             else:
                 await ctx.send("📭 La cola de canciones está vacía.")
                 self.current_song = None
@@ -323,18 +327,25 @@ class MusicCore(commands.Cog):
         else:
             await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
 
-    async def expand_radio_queue(self, ctx):
+    async def expand_radio_queue(self, ctx) -> bool:
         with get_db_session() as session:
             songs = session.query(Song).all()
             if not songs:
                 await ctx.send("⚠️ No hay canciones en la base de datos para generar la radio.")
                 self.radio_mode = False
-                return
+                return False
             song_dicts = [{'id': getattr(s, 'url', s.id), 'title': s.title, 'duration': s.duration} for s in songs]
 
         selected = random.choice(song_dicts)
         await ctx.send(f"📻 Radio Automática: **{selected['title']}**")
-        await self.add_from_youtube(ctx, selected['title'], origin="📻 Radio Automática")
+        try:
+            info = await extract_info(selected['title'])
+            info['origin'] = "📻 Radio Automática"
+            self.song_queue.append(info)
+            return True
+        except Exception as e:
+            print(f"⚠️ Error al extraer canción para radio: {e}", flush=True)
+            return False
 
     # ==============================================================================
     # COMANDOS DE DISCORD
