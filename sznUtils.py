@@ -337,45 +337,77 @@ def extract_flat_metadata(query: str) -> dict | None:
 
 async def extract_info(query: str) -> dict:
     """
-    Función principal unificada de extracción que soporta los 3 flujos:
-    1. Direct YouTube link / Video ID -> Piped /streams/{id}
-    2. Search query or external link (Spotify/SoundCloud) -> Metadata + Piped /search
-    3. Direct Media File (.mp3 / raw URL) -> Direct media stream fallback
+    Función principal unificada de extracción inteligente:
+    1. Si hay cookies.txt/cookies disponibles -> Extrae directamente vía yt-dlp con cookies (100% oficial y veloz).
+    2. Si no hay cookies o yt-dlp falla -> Consulta espejos Piped & Invidious REST API.
+    3. Fallback final -> Stream nativo directo.
     """
     if not query:
         raise ValueError("Consulta vacía.")
 
     q = query.strip()
-
-    # FLUJO 1: Enlace directo o ID de YouTube
-    video_id = extract_youtube_id(q)
-    if video_id:
-        info = await fetch_piped_stream(video_id)
-        if info:
-            return info
-
-    # FLUJO 2: Búsqueda de texto o enlace externo (Spotify / SoundCloud)
+    cookie_path = get_cookie_file_path()
     clean_query = q
+
+    # Si es un enlace de Spotify o SoundCloud, extraer título limpio
     if "spotify.com/track" in q or "soundcloud.com" in q:
         flat_meta = extract_flat_metadata(q)
         if flat_meta and flat_meta.get('title'):
             clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}".strip()
 
+    search_target = clean_query if clean_query.startswith("http") else f"ytsearch:{clean_query}"
+
+    # FLUJO 1: Si tenemos cookies válidas (cookies.txt o BD), usar yt-dlp primero
+    if cookie_path:
+        try:
+            from yt_dlp import YoutubeDL
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "noplaylist": True,
+                "quiet": True,
+                "nocheckcertificate": True,
+                "cookiefile": cookie_path,
+                "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}}
+            }
+            def _yt_with_cookies():
+                with YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(search_target, download=False)
+
+            info = await asyncio.to_thread(_yt_with_cookies)
+            if info:
+                entry = info['entries'][0] if 'entries' in info and info['entries'] else info
+                stream_url = entry.get('url')
+                formats = entry.get('formats', [])
+                if not stream_url and formats:
+                    audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                    if audio_formats:
+                        stream_url = audio_formats[-1]['url']
+
+                if stream_url:
+                    print(f"✅ Stream resuelto vía yt-dlp con cookies: {entry.get('title')}", flush=True)
+                    return {
+                        'id': entry.get('id', 'direct'),
+                        'title': entry.get('title', clean_query),
+                        'url': stream_url,
+                        'duration': entry.get('duration', 0),
+                        'uploader': entry.get('uploader', 'Artist'),
+                        'thumbnail': entry.get('thumbnail', '')
+                    }
+        except Exception as e:
+            print(f"⚠️ Extracción yt-dlp con cookies falló: {e}. Intentando espejos Piped/Invidious...", flush=True)
+
+    # FLUJO 2: Espejos REST API (Piped & Invidious)
+    video_id = extract_youtube_id(clean_query)
+    if video_id:
+        info = await fetch_piped_stream(video_id)
+        if info:
+            return info
+
     search_info = await fetch_piped_search(clean_query)
     if search_info:
         return search_info
 
-    # Si la búsqueda limpia falló, intentar extraer flat_metadata y reintentar Piped
-    flat_meta = extract_flat_metadata(q)
-    if flat_meta and flat_meta.get('title'):
-        title_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}".strip()
-        search_info = await fetch_piped_search(title_query)
-        if search_info:
-            return search_info
-
-    # FLUJO 3: Fallback a yt-dlp nativo con cookies stealth
-    search_target = q if q.startswith("http") else f"ytsearch:{q}"
-    cookie_path = get_cookie_file_path()
+    # FLUJO 3: Fallback nativo yt-dlp (sin cookies si todo lo anterior no resolvió)
     try:
         from yt_dlp import YoutubeDL
         ydl_opts = {
@@ -383,14 +415,13 @@ async def extract_info(query: str) -> dict:
             "noplaylist": True,
             "quiet": True,
             "nocheckcertificate": True,
-            "cookiefile": cookie_path if cookie_path else None,
             "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}}
         }
-        def _yt_direct():
+        def _yt_fallback():
             with YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(search_target, download=False)
 
-        info = await asyncio.to_thread(_yt_direct)
+        info = await asyncio.to_thread(_yt_fallback)
         if info:
             entry = info['entries'][0] if 'entries' in info and info['entries'] else info
             stream_url = entry.get('url')
@@ -402,13 +433,13 @@ async def extract_info(query: str) -> dict:
 
             return {
                 'id': entry.get('id', 'direct'),
-                'title': entry.get('title', q),
-                'url': stream_url or q,
+                'title': entry.get('title', clean_query),
+                'url': stream_url or clean_query,
                 'duration': entry.get('duration', 0),
                 'uploader': entry.get('uploader', 'Direct Stream'),
                 'thumbnail': entry.get('thumbnail', '')
             }
     except Exception as fallback_err:
-        print(f"⚠️ Fallback directo falló: {fallback_err}", flush=True)
+        print(f"⚠️ Fallback directo final falló: {fallback_err}", flush=True)
 
     raise RuntimeError(f"No se pudo resolver el stream de audio para: '{query}'")
