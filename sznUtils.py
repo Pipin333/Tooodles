@@ -337,19 +337,17 @@ def extract_flat_metadata(query: str) -> dict | None:
 
 async def extract_info(query: str) -> dict:
     """
-    Función principal unificada de extracción inteligente:
-    1. Si hay cookies.txt/cookies disponibles -> Extrae directamente vía yt-dlp con cookies (100% oficial y veloz).
-    2. Si no hay cookies o yt-dlp falla -> Consulta espejos Piped & Invidious REST API.
-    3. Fallback final -> Stream nativo directo.
+    Extracción ultrarrápida y ultraresiliente en 3 niveles:
+    1. Extractor Android/iOS nativo (sin cookies) -> No requiere JS solver, 0 bloqueos, 100% rápido.
+    2. Espejos Piped & Invidious REST API (0% scraping).
+    3. Extractor yt-dlp con cookies (para contenido restrictivo).
     """
     if not query:
         raise ValueError("Consulta vacía.")
 
     q = query.strip()
-    cookie_path = get_cookie_file_path()
     clean_query = q
 
-    # Si es un enlace de Spotify o SoundCloud, extraer título limpio
     if "spotify.com/track" in q or "soundcloud.com" in q:
         flat_meta = extract_flat_metadata(q)
         if flat_meta and flat_meta.get('title'):
@@ -357,17 +355,67 @@ async def extract_info(query: str) -> dict:
 
     search_target = clean_query if clean_query.startswith("http") else f"ytsearch:{clean_query}"
 
-    # FLUJO 1: Si tenemos cookies válidas (cookies.txt o BD), usar yt-dlp primero
+    # NIVEL 1: Extractor Android/iOS nativo (Sin cookies -> Evita SABR y no requiere JS solver)
+    try:
+        from yt_dlp import YoutubeDL
+        ydl_opts = {
+            "format": "bestaudio/best/ba",
+            "noplaylist": True,
+            "quiet": True,
+            "nocheckcertificate": True,
+            "extractor_args": {"youtube": {"player_client": ["android", "ios"]}}
+        }
+        def _yt_android():
+            with YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(search_target, download=False)
+
+        info = await asyncio.to_thread(_yt_android)
+        if info:
+            entry = info['entries'][0] if 'entries' in info and info['entries'] else info
+            stream_url = entry.get('url')
+            formats = entry.get('formats', [])
+            if not stream_url and formats:
+                valid_audio = [f for f in formats if f.get('url') and f.get('acodec') != 'none']
+                if valid_audio:
+                    best_valid = sorted(valid_audio, key=lambda x: int(x.get('tbr') or x.get('bitrate') or 0), reverse=True)[0]
+                    stream_url = best_valid['url']
+
+            if stream_url:
+                print(f"✅ Stream resuelto vía cliente Android/iOS nativo: {entry.get('title')}", flush=True)
+                return {
+                    'id': entry.get('id', 'direct'),
+                    'title': entry.get('title', clean_query),
+                    'url': stream_url,
+                    'duration': entry.get('duration', 0),
+                    'uploader': entry.get('uploader', 'Artist'),
+                    'thumbnail': entry.get('thumbnail', '')
+                }
+    except Exception as e:
+        print(f"⚠️ Cliente Android/iOS no resolvió: {e}. Intentando espejos Piped/Invidious...", flush=True)
+
+    # NIVEL 2: Espejos REST API (Piped & Invidious)
+    video_id = extract_youtube_id(clean_query)
+    if video_id:
+        info = await fetch_piped_stream(video_id)
+        if info:
+            return info
+
+    search_info = await fetch_piped_search(clean_query)
+    if search_info:
+        return search_info
+
+    # NIVEL 3: Extractor yt-dlp con cookies (para vídeos con restricción de edad/región)
+    cookie_path = get_cookie_file_path()
     if cookie_path:
         try:
             from yt_dlp import YoutubeDL
             ydl_opts = {
-                "format": "bestaudio/best/ba/ba*",
+                "format": "bestaudio/best/ba",
                 "noplaylist": True,
                 "quiet": True,
                 "nocheckcertificate": True,
                 "cookiefile": cookie_path,
-                "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
+                "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web"]}}
             }
             def _yt_with_cookies():
                 with YoutubeDL(ydl_opts) as ydl:
@@ -383,10 +431,6 @@ async def extract_info(query: str) -> dict:
                     if valid_audio:
                         best_valid = sorted(valid_audio, key=lambda x: int(x.get('tbr') or x.get('bitrate') or 0), reverse=True)[0]
                         stream_url = best_valid['url']
-                    else:
-                        any_valid = [f for f in formats if f.get('url')]
-                        if any_valid:
-                            stream_url = any_valid[-1]['url']
 
                 if stream_url:
                     print(f"✅ Stream resuelto vía yt-dlp con cookies: {entry.get('title')}", flush=True)
@@ -399,52 +443,6 @@ async def extract_info(query: str) -> dict:
                         'thumbnail': entry.get('thumbnail', '')
                     }
         except Exception as e:
-            print(f"⚠️ Extracción yt-dlp con cookies falló: {e}. Intentando espejos Piped/Invidious...", flush=True)
-
-    # FLUJO 2: Espejos REST API (Piped & Invidious)
-    video_id = extract_youtube_id(clean_query)
-    if video_id:
-        info = await fetch_piped_stream(video_id)
-        if info:
-            return info
-
-    search_info = await fetch_piped_search(clean_query)
-    if search_info:
-        return search_info
-
-    # FLUJO 3: Fallback nativo yt-dlp (sin cookies si todo lo anterior no resolvió)
-    try:
-        from yt_dlp import YoutubeDL
-        ydl_opts = {
-            "format": "bestaudio/best/ba",
-            "noplaylist": True,
-            "quiet": True,
-            "nocheckcertificate": True,
-            "extractor_args": {"youtube": {"player_client": ["android", "ios", "mweb"]}}
-        }
-        def _yt_fallback():
-            with YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(search_target, download=False)
-
-        info = await asyncio.to_thread(_yt_fallback)
-        if info:
-            entry = info['entries'][0] if 'entries' in info and info['entries'] else info
-            stream_url = entry.get('url')
-            formats = entry.get('formats', [])
-            if not stream_url and formats:
-                audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                if audio_formats:
-                    stream_url = audio_formats[-1]['url']
-
-            return {
-                'id': entry.get('id', 'direct'),
-                'title': entry.get('title', clean_query),
-                'url': stream_url or clean_query,
-                'duration': entry.get('duration', 0),
-                'uploader': entry.get('uploader', 'Direct Stream'),
-                'thumbnail': entry.get('thumbnail', '')
-            }
-    except Exception as fallback_err:
-        print(f"⚠️ Fallback directo final falló: {fallback_err}", flush=True)
+            print(f"⚠️ Extracción con cookies falló: {e}", flush=True)
 
     raise RuntimeError(f"No se pudo resolver el stream de audio para: '{query}'")
