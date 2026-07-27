@@ -1,0 +1,20 @@
+# Secretos y Autenticación
+cookies.txt
+*.txt
+.env
+
+# Bases de Datos Locales
+*.db
+tooodles.db
+
+# Cache y Archivos Temporales de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+/tmp/cache_*
+
+# Docker e IDEs
+.dockerignore
+.vscode/
+.idea/
