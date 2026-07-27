@@ -334,48 +334,113 @@ class MusicCore(commands.Cog):
     async def expand_radio_queue(self, ctx, seed_id: str | None = None, seed_title: str | None = None) -> bool:
         """
         Genera 5 canciones recomendadas distintas en lote y las añade a la cola.
+        Usa Spotify search por artista/género como fuente principal.
         """
         if not hasattr(self, 'radio_history'):
             self.radio_history = []
 
-        target_seed = seed_id or getattr(self, 'radio_seed_id', None)
         target_title = seed_title or getattr(self, 'last_played_title', None)
         if not target_title and self.current_song:
             target_title = self.current_song.get('title')
 
+        # Agregar la canción actual al historial ANTES de buscar, para no recomendarla
+        if self.current_song and self.current_song.get('title'):
+            curr_lower = self.current_song['title'].lower()
+            if curr_lower not in self.radio_history:
+                self.radio_history.append(curr_lower)
+        if target_title:
+            tt_lower = target_title.lower()
+            if tt_lower not in self.radio_history:
+                self.radio_history.append(tt_lower)
+
+        # También bloquear lo que ya está en cola
+        queued_titles = [s['title'].lower() for s in self.song_queue if s.get('title')]
+
+        print(f"📻 [RADIO DEBUG] target_title='{target_title}'", flush=True)
+        print(f"📻 [RADIO DEBUG] radio_history ({len(self.radio_history)}): {self.radio_history[-5:]}", flush=True)
+        print(f"📻 [RADIO DEBUG] queued_titles ({len(queued_titles)}): {queued_titles[:5]}", flush=True)
+
         recommended_titles = []
 
-        # 1. Buscar vía API de Spotify si está disponible
-        if self.sp:
+        # 1. Intentar Spotify Recommendations API
+        if self.sp and target_title:
             try:
-                if not target_seed and target_title:
-                    results = self.sp.search(q=target_title, type='track', limit=1)
-                    if results and results.get('tracks', {}).get('items'):
-                        target_seed = results['tracks']['items'][0]['id']
+                # Primero buscar el track en Spotify para obtener artista
+                search_result = self.sp.search(q=target_title, type='track', limit=1)
+                seed_track = None
+                seed_artist = None
+                if search_result and search_result.get('tracks', {}).get('items'):
+                    seed_track = search_result['tracks']['items'][0]
+                    seed_artist = seed_track['artists'][0]['name']
+                    print(f"📻 [RADIO DEBUG] Spotify encontró: '{seed_track['name']}' by '{seed_artist}' (id: {seed_track['id']})", flush=True)
 
-                if target_seed:
-                    recs = self.sp.recommendations(seed_tracks=[target_seed], limit=20)
-                    tracks = recs.get('tracks', [])
-                    for t in tracks:
-                        full_name = f"{t['name']} - {t['artists'][0]['name']}"
-                        clean_name = full_name.lower()
-                        if not any(h in clean_name for h in self.radio_history) and full_name not in recommended_titles:
-                            recommended_titles.append(full_name)
+                # Intentar sp.recommendations()
+                if seed_track:
+                    try:
+                        recs = self.sp.recommendations(seed_tracks=[seed_track['id']], limit=20)
+                        tracks = recs.get('tracks', [])
+                        print(f"📻 [RADIO DEBUG] sp.recommendations() devolvió {len(tracks)} tracks", flush=True)
+                        for t in tracks:
+                            full_name = f"{t['name']} - {t['artists'][0]['name']}"
+                            if self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                recommended_titles.append(full_name)
+                                if len(recommended_titles) >= 5:
+                                    break
+                    except Exception as rec_err:
+                        print(f"⚠️ [RADIO] sp.recommendations() falló (posiblemente deprecado): {rec_err}", flush=True)
+
+                # Si recommendations no dio suficientes, buscar por artista relacionado
+                if len(recommended_titles) < 5 and seed_artist:
+                    try:
+                        artist_search = self.sp.search(q=f"artist:{seed_artist}", type='track', limit=30)
+                        artist_tracks = artist_search.get('tracks', {}).get('items', [])
+                        random.shuffle(artist_tracks)
+                        print(f"📻 [RADIO DEBUG] Búsqueda por artista '{seed_artist}' devolvió {len(artist_tracks)} tracks", flush=True)
+                        for t in artist_tracks:
+                            full_name = f"{t['name']} - {t['artists'][0]['name']}"
+                            if self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                recommended_titles.append(full_name)
+                                if len(recommended_titles) >= 5:
+                                    break
+                    except Exception as art_err:
+                        print(f"⚠️ [RADIO] Búsqueda por artista falló: {art_err}", flush=True)
+
+                # Si aún faltan, buscar por género/estilo similar
+                if len(recommended_titles) < 5 and seed_artist:
+                    try:
+                        genre_queries = [
+                            f"{seed_artist} similar",
+                            f"genre:{seed_artist}",
+                            seed_artist.split()[0] if ' ' in seed_artist else f"{seed_artist} rock"
+                        ]
+                        for gq in genre_queries:
                             if len(recommended_titles) >= 5:
                                 break
-            except Exception as sp_err:
-                print(f"ℹ️ Recomendaciones Spotify radio note: {sp_err}", flush=True)
+                            genre_results = self.sp.search(q=gq, type='track', limit=15)
+                            genre_tracks = genre_results.get('tracks', {}).get('items', [])
+                            random.shuffle(genre_tracks)
+                            for t in genre_tracks:
+                                full_name = f"{t['name']} - {t['artists'][0]['name']}"
+                                if self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                    recommended_titles.append(full_name)
+                                    if len(recommended_titles) >= 5:
+                                        break
+                    except Exception as genre_err:
+                        print(f"⚠️ [RADIO] Búsqueda por género falló: {genre_err}", flush=True)
 
-        # 2. Fallback: Usar canciones registradas en la Base de Datos (orden aleatorio)
+            except Exception as sp_err:
+                print(f"⚠️ [RADIO] Error general de Spotify: {sp_err}", flush=True)
+
+        # 2. Fallback: canciones de la Base de Datos (orden aleatorio)
         if len(recommended_titles) < 5:
+            print(f"📻 [RADIO DEBUG] Fallback a BD (tenemos {len(recommended_titles)} de Spotify)", flush=True)
             with get_db_session() as session:
                 songs = session.query(Song).all()
                 if songs:
                     shuffled_db = list(songs)
                     random.shuffle(shuffled_db)
                     for s in shuffled_db:
-                        clean_name = s.title.lower()
-                        if not any(h in clean_name for h in self.radio_history) and s.title not in recommended_titles:
+                        if self._radio_is_unique(s.title, recommended_titles, queued_titles):
                             recommended_titles.append(s.title)
                             if len(recommended_titles) >= 5:
                                 break
@@ -385,6 +450,7 @@ class MusicCore(commands.Cog):
             self.radio_mode = False
             return False
 
+        print(f"📻 [RADIO DEBUG] Recomendaciones finales: {recommended_titles}", flush=True)
         await ctx.send(f"📻 **Radio Automática**: Añadidos **{len(recommended_titles)}** temas sugeridos a la cola.")
 
         for title in recommended_titles:
@@ -402,6 +468,33 @@ class MusicCore(commands.Cog):
             self.song_queue.append(song_dict)
 
         self.schedule_queue_optimizations()
+        return True
+
+    def _radio_is_unique(self, candidate: str, recommended: list, queued: list) -> bool:
+        """Verifica que un candidato no sea duplicado del historial, cola actual ni recomendaciones ya elegidas."""
+        c_lower = candidate.lower()
+        # Extraer solo el nombre de la canción (antes del " - ")
+        c_song_name = c_lower.split(" - ")[0].strip() if " - " in c_lower else c_lower
+
+        # Verificar contra historial de radio
+        for h in self.radio_history:
+            h_song_name = h.split(" - ")[0].strip() if " - " in h else h
+            if c_song_name in h_song_name or h_song_name in c_song_name:
+                return False
+
+        # Verificar contra cola actual
+        for q in queued:
+            q_song_name = q.split(" - ")[0].strip() if " - " in q else q
+            if c_song_name in q_song_name or q_song_name in c_song_name:
+                return False
+
+        # Verificar contra recomendaciones ya elegidas en este batch
+        for r in recommended:
+            r_lower = r.lower()
+            r_song_name = r_lower.split(" - ")[0].strip() if " - " in r_lower else r_lower
+            if c_song_name in r_song_name or r_song_name in c_song_name:
+                return False
+
         return True
 
     # ==============================================================================
