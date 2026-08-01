@@ -352,6 +352,7 @@ class MusicCore(commands.Cog):
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
 
     async def play_next(self, ctx):
+        self.last_ctx = ctx
         if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
             return
 
@@ -375,8 +376,8 @@ class MusicCore(commands.Cog):
 
         # Notificar a UI
         ui = self.bot.get_cog("MusicUI")
-        if ui and self.current_song.get('title'):
-            await ui.notify_now_playing(ctx, self.current_song['title'], self.current_song.get('origin'))
+        if ui and self.current_song:
+            await ui.notify_now_playing(ctx, self.current_song)
 
         musicdb = getattr(self.bot, "musicdb", None)
         if musicdb and self.current_song.get('title'):
@@ -996,6 +997,32 @@ class MusicCore(commands.Cog):
             self.radio_mode = False
             cleanup_cache()
             print("✅ Desconectado por inactividad.", flush=True)
+            last_ctx = getattr(self, 'last_ctx', None)
+            if last_ctx:
+                try:
+                    await last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 2 minutos).")
+                except Exception:
+                    pass
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member, before, after):
+        # Si el miembro que cambió de canal es el bot
+        if member.id == self.bot.user.id:
+            # Si el bot estaba conectado a un canal y ahora ya no lo está
+            if before.channel and not after.channel:
+                print("🔌 Desconexión de canal de voz detectada vía evento.", flush=True)
+                self.song_queue.clear()
+                self.radio_mode = False
+                cleanup_cache()
+                self.voice_client = None
+                self.current_song = None
+                
+                last_ctx = getattr(self, 'last_ctx', None)
+                if last_ctx:
+                    try:
+                        await last_ctx.send("🔌 Me he desconectado del canal de voz (desconexión manual o externa).")
+                    except Exception:
+                        pass
 
     @commands.command()
     async def radio(self, ctx, *, arg: str = "on"):
