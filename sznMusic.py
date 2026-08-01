@@ -249,6 +249,12 @@ class MusicCore(commands.Cog):
 
     async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada"):
         song_info['origin'] = origin
+        if ctx:
+            if ctx.author:
+                song_info['user_id'] = str(ctx.author.id)
+                song_info['username'] = ctx.author.name
+            if ctx.guild:
+                song_info['guild_id'] = str(ctx.guild.id)
         
         # Insertar canciones del usuario antes de las canciones recomendadas por la radio
         insert_idx = len(self.song_queue)
@@ -324,7 +330,10 @@ class MusicCore(commands.Cog):
                     'url': None,
                     'duration': int(track.get('duration_ms', 0) / 1000),
                     'uploader': track['artists'][0]['name'],
-                    'origin': f"🎵 Playlist por {ctx.author.name}"
+                    'origin': f"🎵 Playlist por {ctx.author.name}",
+                    'user_id': str(ctx.author.id) if ctx and ctx.author else None,
+                    'username': ctx.author.name if ctx and ctx.author else None,
+                    'guild_id': str(ctx.guild.id) if ctx and ctx.guild else None
                 }
                 # Insertar canciones del usuario antes de las canciones recomendadas por la radio
                 insert_idx = len(self.song_queue)
@@ -399,6 +408,31 @@ class MusicCore(commands.Cog):
         def after_playing(error):
             if error:
                 print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+
+            # Registrar telemetría / estadísticas
+            if self.current_song:
+                try:
+                    start_time = getattr(self, 'current_song_start_time', None)
+                    listened_duration = int(time.time() - start_time) if start_time else 0
+                    
+                    skipped = getattr(self, 'current_song_skipped', False)
+                    completed = not skipped
+                    
+                    from database import log_play_event
+                    log_play_event(
+                        title=self.current_song.get('title'),
+                        artist=self.current_song.get('uploader') or self.current_song.get('title'),
+                        duration=self.current_song.get('duration', 0),
+                        user_id=self.current_song.get('user_id'),
+                        username=self.current_song.get('username') or "Desconocido",
+                        guild_id=self.current_song.get('guild_id'),
+                        listened_duration=listened_duration,
+                        completed=completed,
+                        skipped_at=listened_duration if skipped else None
+                    )
+                except Exception as db_err:
+                    print(f"⚠️ Error al registrar telemetría de reproducción: {db_err}", flush=True)
+
             if self.current_song and self.current_song.get('title'):
                 self.last_played_title = self.current_song['title']
                 if not hasattr(self, 'radio_history'):
@@ -423,6 +457,9 @@ class MusicCore(commands.Cog):
                 before_options=before_opts,
                 options=ffmpeg_options
             )
+
+        self.current_song_start_time = time.time()
+        self.current_song_skipped = False
 
         if self.voice_client and self.voice_client.is_connected():
             self.voice_client.play(audio_source, after=after_playing)
@@ -807,6 +844,7 @@ class MusicCore(commands.Cog):
     async def skip(self, ctx):
         """Salta la canción actual."""
         if self.voice_client and self.voice_client.is_playing():
+            self.current_song_skipped = True
             self.voice_client.stop()
             await ctx.send("⏭️ Canción saltada.")
         else:
