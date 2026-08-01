@@ -54,22 +54,32 @@ GENRE_EXPANSION = {
 
 async def prefetch_chunk_throttled(song_info: dict) -> str | None:
     """
-    Descarga los primeros 2 MB del stream de audio a /tmp/cache_{id}.webm
-    en bloques pequeños de 64 KB con micro-pausas (throttling) para NO saturar
-    la CPU ni el socket de red durante la reproducción actual.
+    Descarga el stream de audio completo a /tmp/cache_{id}.webm en segundo plano.
+    Usa un archivo temporal (.tmp) y lo renombra al finalizar para asegurar
+    que FFmpeg nunca lea un archivo truncado (lo que causaría saltos de canción).
+    Solo descarga canciones de menos de 10 minutos (600s).
     """
     song_id = song_info.get('id')
     stream_url = song_info.get('url')
+    duration = song_info.get('duration', 0)
+
     if not song_id or not stream_url or not stream_url.startswith("http"):
         return None
 
-    cache_path = os.path.join(tempfile.gettempdir(), f"cache_{song_id}.webm")
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) >= 2000000:
+    # No precargar temas de más de 10 minutos para evitar saturación de disco
+    if duration > 600:
+        return None
+
+    temp_dir = tempfile.gettempdir()
+    cache_path = os.path.join(temp_dir, f"cache_{song_id}.webm")
+    temp_path = os.path.join(temp_dir, f"cache_{song_id}.tmp")
+
+    # Si ya existe el archivo completo, usarlo
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
         song_info['cache_path'] = cache_path
         return cache_path
 
     headers = {
-        "Range": "bytes=0-2097152",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
 
@@ -77,34 +87,50 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
         import aiohttp
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-            async with session.get(stream_url, timeout=10) as resp:
-                if resp.status in (200, 206):
-                    with open(cache_path, "wb") as f:
+            async with session.get(stream_url, timeout=15) as resp:
+                if resp.status == 200:
+                    with open(temp_path, "wb") as f:
                         async for chunk in resp.content.iter_chunked(65536):
                             f.write(chunk)
-                            await asyncio.sleep(0.02)  # Micro-pausa de 20ms para ceder CPU al event loop
+                            await asyncio.sleep(0.01)  # Micro-pausa de 10ms para ceder CPU al event loop
 
-                    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                    # Renombrado atómico al completar la descarga
+                    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                        if os.path.exists(cache_path):
+                            try:
+                                os.remove(cache_path)
+                            except Exception:
+                                pass
+                        os.rename(temp_path, cache_path)
                         song_info['cache_path'] = cache_path
-                        print(f"⚡ Chunk de 2MB precargado suavemente en caché: {cache_path}", flush=True)
+                        print(f"⚡ Audio completo precargado en caché: {cache_path}", flush=True)
                         return cache_path
     except Exception as e:
-        print(f"ℹ️ Precarga suave omitida para {song_id}: {e}", flush=True)
+        print(f"⚠️ Error al precargar audio para {song_id}: {e}", flush=True)
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
     return None
 
 def cleanup_cache(song_info: dict | None = None):
-    """Limpia los archivos parciales en /tmp."""
+    """Limpia los archivos parciales y completos en /tmp."""
     try:
         if song_info and song_info.get('id'):
-            cache_path = os.path.join(tempfile.gettempdir(), f"cache_{song_info['id']}.webm")
+            temp_dir = tempfile.gettempdir()
+            cache_path = os.path.join(temp_dir, f"cache_{song_info['id']}.webm")
+            temp_path = os.path.join(temp_dir, f"cache_{song_info['id']}.tmp")
             if os.path.exists(cache_path):
                 os.remove(cache_path)
-                print(f"🧹 Cache parcial eliminado: {cache_path}", flush=True)
+                print(f"🧹 Cache completo eliminado: {cache_path}", flush=True)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         else:
             temp_dir = tempfile.gettempdir()
             for fname in os.listdir(temp_dir):
-                if fname.startswith("cache_") and fname.endswith(".webm"):
+                if fname.startswith("cache_") and (fname.endswith(".webm") or fname.endswith(".tmp")):
                     try:
                         os.remove(os.path.join(temp_dir, fname))
                     except Exception:
