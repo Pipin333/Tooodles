@@ -878,20 +878,7 @@ class MusicCore(commands.Cog):
         else:
             await ctx.send("⚠️ No hay ninguna canción reproduciéndose.")
 
-    @commands.command(name="q", aliases=["queue"])
-    async def queue(self, ctx):
-        """Muestra la cola de canciones actual."""
-        if not self.song_queue:
-            await ctx.send("📭 La cola de canciones está vacía.")
-            return
 
-        lines = [f"{idx+1}. **{s['title']}** ({self.format_duration(s.get('duration', 0))})" for idx, s in enumerate(self.song_queue[:10])]
-        content = "\n".join(lines)
-        if len(self.song_queue) > 10:
-            content += f"\n... y {len(self.song_queue) - 10} canciones más."
-
-        embed = discord.Embed(title="🎶 Cola de Canciones", description=content, color=discord.Color.blue())
-        await ctx.send(embed=embed)
 
     @commands.command(name="np", aliases=["nowplaying"])
     async def nowplaying(self, ctx):
