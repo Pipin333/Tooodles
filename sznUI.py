@@ -6,6 +6,39 @@ from discord.ui import View, Button
 class MusicUI(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.bot.add_check(self.check_command_channel)
+
+    def cog_unload(self):
+        self.bot.remove_check(self.check_command_channel)
+
+    async def check_command_channel(self, ctx):
+        if not ctx.guild:
+            return True
+
+        from sznUtils import load_config
+        channel_id_str = load_config(f"cmd_channel_{ctx.guild.id}")
+        if not channel_id_str:
+            return True
+
+        if str(ctx.channel.id) == channel_id_str:
+            return True
+
+        # Los comandos 'channel', 'canal' y 'settings' siempre están permitidos en cualquier canal 
+        # para que los administradores puedan configurar o arreglar la vinculación si es necesario.
+        if ctx.command.name in ("channel", "canal", "settings"):
+            return True
+
+        # Eliminar el comando del usuario e informarle temporalmente
+        try:
+            await ctx.message.delete(delay=3)
+            await ctx.send(
+                f"⚠️ Los comandos de música están restringidos al canal exclusivo: <#{channel_id_str}>.", 
+                delete_after=5
+            )
+        except Exception:
+            pass
+
+        return False
 
     async def notify_now_playing(self, ctx, song_dict):
         core = self.bot.get_cog("MusicCore")
@@ -267,6 +300,118 @@ class MusicUI(commands.Cog):
                 await interaction.response.edit_message(embed=get_page_embed(current_page), view=self)
 
         await ctx.send(embed=get_page_embed(current_page), view=QueueControls(), delete_after=300)
+
+    @commands.command(name="channel", aliases=["canal"])
+    @commands.has_permissions(administrator=True)
+    async def channel_config(self, ctx, *, arg: str = None):
+        """Configura un único canal de texto para recibir comandos de música (Solo Admin)."""
+        from sznUtils import save_config, load_config
+        
+        guild_id = ctx.guild.id
+        config_key = f"cmd_channel_{guild_id}"
+        
+        if arg is None:
+            current = load_config(config_key)
+            if current:
+                embed = discord.Embed(
+                    title="⚙️ Configuración de Canal Exclusivo",
+                    description=f"Los comandos están bloqueados al canal: <#{current}>.\n\n"
+                                f"Para desactivar esta restricción y permitir comandos en cualquier canal, escribe:\n"
+                                f"`td?channel reset`",
+                    color=0x7d5fff
+                )
+                await ctx.send(embed=embed)
+            else:
+                embed = discord.Embed(
+                    title="⚙️ Configuración de Canal Exclusivo",
+                    description="El bot actualmente responde a comandos en **cualquier canal de texto**.\n\n"
+                                f"Para restringir los comandos a un único canal, escribe:\n"
+                                f"`td?channel #nombre-del-canal` o `td?channel aqui`",
+                    color=0x7d5fff
+                )
+                await ctx.send(embed=embed)
+            return
+
+        arg_lower = arg.lower().strip()
+        
+        if arg_lower in ("reset", "off", "desactivar", "clear"):
+            save_config(config_key, "")
+            embed = discord.Embed(
+                title="⚙️ Configuración Actualizada",
+                description="✅ Se ha desactivado la restricción de canal. El bot ahora responderá en **todos los canales de texto**.",
+                color=0x1db954
+            )
+            await ctx.send(embed=embed)
+            return
+            
+        if arg_lower in ("aqui", "aquí", "here", "this"):
+            target_channel = ctx.channel
+        else:
+            channel_id = None
+            if arg.startswith("<#") and arg.endswith(">"):
+                try:
+                    channel_id = int(arg[2:-1])
+                except ValueError:
+                    pass
+            else:
+                try:
+                    channel_id = int(arg)
+                except ValueError:
+                    pass
+                    
+            if channel_id:
+                target_channel = ctx.guild.get_channel(channel_id)
+            else:
+                target_channel = discord.utils.get(ctx.guild.text_channels, name=arg)
+
+        if not target_channel:
+            await ctx.send("❌ No pude encontrar ese canal de texto. Menciónalo como `#nombre-canal` o escribe `td?channel aqui`.")
+            return
+
+        save_config(config_key, str(target_channel.id))
+        
+        embed = discord.Embed(
+            title="⚙️ Configuración Actualizada",
+            description=f"✅ Los comandos de música ahora están restringidos al canal {target_channel.mention}.\n\n"
+                        f"Los comandos enviados en otros canales serán eliminados automáticamente y el bot los ignorará.",
+            color=0x1db954
+        )
+        await ctx.send(embed=embed)
+
+    @channel_config.error
+    async def channel_config_error(self, ctx, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("❌ Necesitas permisos de **Administrador** para configurar el canal exclusivo.")
+
+    @commands.command(name="settings", aliases=["config"])
+    async def settings_dashboard(self, ctx):
+        """Muestra el panel general de configuración del servidor."""
+        from sznUtils import load_config
+        core = self.bot.get_cog("MusicCore")
+        
+        guild_id = ctx.guild.id
+        cmd_channel = load_config(f"cmd_channel_{guild_id}")
+        cmd_channel_val = f"<#{cmd_channel}>" if cmd_channel else "`Cualquier canal`"
+        
+        # Modo radio por defecto
+        # (El bot inicia con radio_mode inactivo por defecto para recolectar datos)
+        radio_mode_val = "`Activo`" if core and getattr(core, 'radio_mode', False) else "`Inactivo (Por defecto)`"
+        
+        # Vibe profile
+        vibe_size = len(getattr(core, 'recent_artist_ids', [])) if core else 0
+        
+        embed = discord.Embed(
+            title=f"⚙️ Ajustes de Tooodles - {ctx.guild.name}",
+            color=0x7d5fff
+        )
+        
+        embed.add_field(name="⌨️ Prefijo del Bot", value="`td?`", inline=True)
+        embed.add_field(name="🔒 Canal de Comandos", value=cmd_channel_val, inline=True)
+        embed.add_field(name="📻 Modo Radio (Default)", value=radio_mode_val, inline=True)
+        embed.add_field(name="🧬 Historial de Recomendación", value=f"`{vibe_size}/5` artistas registrados", inline=True)
+        
+        embed.set_footer(text="Para cambiar el canal exclusivo, usa td?channel. Para alternar la radio, haz clic en el botón del reproductor.")
+        await ctx.send(embed=embed)
 
 # Limpieza global de cachés
 def cleanup_cache(song_info: dict | None = None):
