@@ -598,12 +598,17 @@ class MusicCore(commands.Cog):
                                             random.shuffle(gen_tracks)
                                             for t in gen_tracks:
                                                 t_artist = t['artists'][0]['name']
+                                                
+                                                # Evitar repetir artistas en las recomendaciones del mismo lote para variedad absoluta
+                                                already_recommended_artists = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
+                                                if t_artist.lower().strip() in already_recommended_artists:
+                                                    continue
+
                                                 full_name = f"{t['name']} - {t_artist}"
                                                 if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
                                                     recommended_titles.append(full_name)
                                                     print(f"📻 [RADIO DEBUG] Añadido tema por género '{gen_name}': '{full_name}'", flush=True)
-                                                    if len(recommended_titles) >= 5:
-                                                        break
+                                                    break # Solo 1 tema por género para máxima variedad
                                     except Exception as gen_search_err:
                                         print(f"⚠️ [RADIO] Búsqueda de track para género {gen_name} falló: {gen_search_err}", flush=True)
                         except Exception as artist_info_err:
@@ -626,11 +631,16 @@ class MusicCore(commands.Cog):
                                 print(f"📻 [RADIO DEBUG] Capa 3 ('{sq}'): {len(sim_tracks)} tracks", flush=True)
                                 for t in sim_tracks:
                                     t_artist = t['artists'][0]['name']
+                                    
+                                    # Evitar repetir artistas
+                                    already_recommended_artists = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
+                                    if t_artist.lower().strip() in already_recommended_artists:
+                                        continue
+
                                     full_name = f"{t['name']} - {t_artist}"
                                     if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
                                         recommended_titles.append(full_name)
-                                        if len(recommended_titles) >= 5:
-                                            break
+                                        break # 1 por query para variedad
                             except Exception as e:
                                 print(f"⚠️ [RADIO] Capa 3 falló para '{sq}': {e}", flush=True)
 
