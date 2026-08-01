@@ -334,6 +334,8 @@ class MusicCore(commands.Cog):
             return await self.play_next(ctx)
 
         self.current_song = next_item
+        # Registrar el artista en el perfil musical de la radio
+        self.record_played_track(self.current_song.get('title', ''))
 
         # Notificar a UI
         ui = self.bot.get_cog("MusicUI")
@@ -525,13 +527,34 @@ class MusicCore(commands.Cog):
                     except Exception as e:
                         print(f"⚠️ [RADIO] Capa 1 falló: {e}", flush=True)
 
-                    # Capa 2: Artistas de géneros similares (usando los géneros expandidos oficiales del artista)
-                    if len(recommended_titles) < 5 and seed_artist_id:
+                    # Capa 2: Artistas de géneros similares (usando los géneros expandidos de artistas recientes)
+                    if len(recommended_titles) < 5:
                         try:
-                            artist_info = self.sp.artist(seed_artist_id)
-                            genres = artist_info.get('genres', [])
-                            expanded_genres = self._expand_genres(genres)
-                            print(f"📻 [RADIO DEBUG] Capa 2 (géneros de id:{seed_artist_id}): {genres} -> Ampliado a: {expanded_genres}", flush=True)
+                            genres = []
+                            artist_ids = getattr(self, 'recent_artist_ids', [])
+                            
+                            # 1. Intentar obtener géneros del historial de artistas en lote (batch call)
+                            if artist_ids:
+                                try:
+                                    artists_info = self.sp.artists(artist_ids)
+                                    for artist in artists_info.get('artists', []):
+                                        if artist and artist.get('genres'):
+                                            genres.extend(artist['genres'])
+                                    print(f"📻 [RADIO DEBUG] Perfil de géneros obtenidos del historial ({len(artist_ids)} artistas): {set(genres)}", flush=True)
+                                except Exception as hist_err:
+                                    print(f"⚠️ [RADIO] Error al consultar lote de artistas recientes: {hist_err}", flush=True)
+
+                            # 2. Fallback al artista de la canción actual si el historial está vacío o falló
+                            if not genres and seed_artist_id:
+                                try:
+                                    artist_info = self.sp.artist(seed_artist_id)
+                                    genres = artist_info.get('genres', [])
+                                    print(f"📻 [RADIO DEBUG] Fallback a géneros de artista actual: {genres}", flush=True)
+                                except Exception as fallback_err:
+                                    print(f"⚠️ [RADIO] Error en fallback de artista actual: {fallback_err}", flush=True)
+
+                            expanded_genres = self._expand_genres(list(set(genres)))
+                            print(f"📻 [RADIO DEBUG] Capa 2 (géneros consolidados): {set(genres)} -> Ampliado a: {expanded_genres}", flush=True)
                             
                             if expanded_genres:
                                 shuffled_genres = list(expanded_genres)
@@ -558,7 +581,7 @@ class MusicCore(commands.Cog):
                                     except Exception as gen_search_err:
                                         print(f"⚠️ [RADIO] Búsqueda de track para género {gen_name} falló: {gen_search_err}", flush=True)
                         except Exception as artist_info_err:
-                            print(f"⚠️ [RADIO] sp.artist falló al obtener géneros: {artist_info_err}", flush=True)
+                            print(f"⚠️ [RADIO] Error general procesando géneros consolidados: {artist_info_err}", flush=True)
 
                     # Capa 3: Búsquedas de texto genéricas como fallback si aún no tenemos 5
                     if len(recommended_titles) < 5:
@@ -689,6 +712,31 @@ class MusicCore(commands.Cog):
                 if "metal" in g_lower:
                     expanded.update(["heavy metal", "thrash metal", "hard rock"])
         return list(expanded)
+
+    def record_played_track(self, title: str):
+        if not self.sp:
+            return
+        async def _async_lookup():
+            try:
+                clean_song, extracted_artist = self._clean_title_for_search(title)
+                search_q = f"artist:{extracted_artist} track:{clean_song}" if extracted_artist else clean_song
+                res = self.sp.search(q=search_q, type='track', limit=1)
+                if res and res.get('tracks', {}).get('items'):
+                    artist_id = res['tracks']['items'][0]['artists'][0]['id']
+                    if not hasattr(self, 'recent_artist_ids'):
+                        self.recent_artist_ids = []
+                    # Evitar duplicados consecutivos y mantener máximo 5
+                    if not self.recent_artist_ids or self.recent_artist_ids[-1] != artist_id:
+                        if artist_id in self.recent_artist_ids:
+                            self.recent_artist_ids.remove(artist_id)
+                        self.recent_artist_ids.append(artist_id)
+                        if len(self.recent_artist_ids) > 5:
+                            self.recent_artist_ids.pop(0)
+                        print(f"📻 [RADIO PROFILE] Artista registrado: {res['tracks']['items'][0]['artists'][0]['name']} (Total: {len(self.recent_artist_ids)})", flush=True)
+            except Exception as e:
+                print(f"⚠️ Error registrando artista reciente para radio: {e}", flush=True)
+        self.bot.loop.create_task(_async_lookup())
+
 
 
     # ==============================================================================
