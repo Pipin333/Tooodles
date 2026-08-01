@@ -595,8 +595,13 @@ class MusicCore(commands.Cog):
                                         gen_search = self.sp.search(q=search_q_genre, type='track', limit=20)
                                         gen_tracks = gen_search.get('tracks', {}).get('items', [])
                                         if gen_tracks:
-                                            random.shuffle(gen_tracks)
-                                            for t in gen_tracks:
+                                            # Ordenar por popularidad (de 0 a 100) de forma descendente para priorizar éxitos
+                                            gen_tracks = sorted(gen_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
+                                            # Tomar los 10 temas más populares y mezclarlos para dar aleatoriedad
+                                            popular_subset = gen_tracks[:10]
+                                            random.shuffle(popular_subset)
+
+                                            for t in popular_subset:
                                                 t_artist = t['artists'][0]['name']
                                                 
                                                 # Evitar repetir artistas en las recomendaciones del mismo lote para variedad absoluta
@@ -607,7 +612,7 @@ class MusicCore(commands.Cog):
                                                 full_name = f"{t['name']} - {t_artist}"
                                                 if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
                                                     recommended_titles.append(full_name)
-                                                    print(f"📻 [RADIO DEBUG] Añadido tema por género '{gen_name}': '{full_name}'", flush=True)
+                                                    print(f"📻 [RADIO DEBUG] Añadido tema por género '{gen_name}': '{full_name}' (Popularidad: {t.get('popularity')})", flush=True)
                                                     break # Solo 1 tema por género para máxima variedad
                                     except Exception as gen_search_err:
                                         print(f"⚠️ [RADIO] Búsqueda de track para género {gen_name} falló: {gen_search_err}", flush=True)
@@ -627,20 +632,25 @@ class MusicCore(commands.Cog):
                             try:
                                 sim_results = self.sp.search(q=sq, type='track', limit=20)
                                 sim_tracks = sim_results.get('tracks', {}).get('items', [])
-                                random.shuffle(sim_tracks)
-                                print(f"📻 [RADIO DEBUG] Capa 3 ('{sq}'): {len(sim_tracks)} tracks", flush=True)
-                                for t in sim_tracks:
-                                    t_artist = t['artists'][0]['name']
-                                    
-                                    # Evitar repetir artistas
-                                    already_recommended_artists = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
-                                    if t_artist.lower().strip() in already_recommended_artists:
-                                        continue
+                                if sim_tracks:
+                                    # Ordenar por popularidad
+                                    sim_tracks = sorted(sim_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
+                                    popular_subset = sim_tracks[:10]
+                                    random.shuffle(popular_subset)
 
-                                    full_name = f"{t['name']} - {t_artist}"
-                                    if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
-                                        recommended_titles.append(full_name)
-                                        break # 1 por query para variedad
+                                    print(f"📻 [RADIO DEBUG] Capa 3 ('{sq}'): {len(sim_tracks)} tracks", flush=True)
+                                    for t in popular_subset:
+                                        t_artist = t['artists'][0]['name']
+                                        
+                                        # Evitar repetir artistas
+                                        already_recommended_artists = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
+                                        if t_artist.lower().strip() in already_recommended_artists:
+                                            continue
+
+                                        full_name = f"{t['name']} - {t_artist}"
+                                        if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                            recommended_titles.append(full_name)
+                                            break # 1 por query para variedad
                             except Exception as e:
                                 print(f"⚠️ [RADIO] Capa 3 falló para '{sq}': {e}", flush=True)
 
