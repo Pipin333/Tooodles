@@ -14,6 +14,44 @@ from sznUtils import extract_info, fetch_stealth_cookies
 SPOTIFY_CLIENT_ID = os.getenv('client_id')
 SPOTIFY_CLIENT_SECRET = os.getenv('client_secret')
 
+GENRE_EXPANSION = {
+    # Hip Hop / Rap / Trap
+    "chilean hip hop": ["latin hip hop", "spanish hip hop", "argentinian hip hop", "boom bap", "mexican hip hop", "rap latina"],
+    "chilean rap": ["latin hip hop", "spanish hip hop", "argentinian hip hop", "boom bap", "rap latina"],
+    "latin hip hop": ["chilean hip hop", "spanish hip hop", "argentinian hip hop", "rap latino", "mexican hip hop", "boom bap"],
+    "rap latino": ["latin hip hop", "chilean hip hop", "mexican hip hop", "argentinian hip hop", "rap latina"],
+    "trap latino": ["reggaeton", "urbano latino", "trap argentino", "dembow", "rkt"],
+    "reggaeton": ["trap latino", "urbano latino", "dembow", "latin pop", "rkt"],
+    "urbano latino": ["reggaeton", "trap latino", "latin pop", "dembow"],
+    "trap argentino": ["trap latino", "urbano latino", "rkt"],
+    
+    # Rock / Indie / Alternative (Chilean, Argentinian, Mexican, Spanish)
+    "chilean rock": ["rock en espanol", "argentinian rock", "latin alternative", "mexican rock", "spanish rock", "chilean indie"],
+    "chilean pop": ["chilean indie", "latin alternative", "latin pop", "synthpop"],
+    "chilean indie": ["chilean pop", "latin alternative", "indie pop", "synthpop"],
+    "rock en espanol": ["chilean rock", "argentinian rock", "mexican rock", "spanish rock", "latin alternative", "rock nacional"],
+    "argentinian rock": ["rock en espanol", "chilean rock", "mexican rock", "spanish rock", "latin alternative", "rock nacional"],
+    "rock nacional": ["argentinian rock", "rock en espanol", "latin alternative", "chilean rock"],
+    "mexican rock": ["rock en espanol", "latin alternative", "argentinian rock", "spanish rock"],
+    "spanish rock": ["rock en espanol", "latin alternative", "argentinian rock", "mexican rock"],
+    "latin alternative": ["rock en espanol", "chilean rock", "argentinian rock", "mexican rock", "spanish rock", "chilean indie"],
+    
+    # Reggae / Ska
+    "reggae en espanol": ["reggae fusion", "latin alternative", "ska", "spanish reggae"],
+    "reggae fusion": ["reggae en espanol", "ska", "dancehall"],
+    "ska": ["ska argentino", "reggae en espanol", "latin alternative"],
+    
+    # Pop / Synthpop / Indie Pop
+    "synthpop": ["indie pop", "latin alternative", "dance pop"],
+    "indie pop": ["synthpop", "latin alternative", "indie rock"],
+    
+    # Metal
+    "metal": ["heavy metal", "thrash metal", "groove metal", "latin metal"],
+    "thrash metal": ["speed metal", "heavy metal", "death metal"],
+    "heavy metal": ["hard rock", "thrash metal", "power metal"]
+}
+
+
 async def prefetch_chunk_throttled(song_info: dict) -> str | None:
     """
     Descarga los primeros 2 MB del stream de audio a /tmp/cache_{id}.webm
@@ -487,15 +525,16 @@ class MusicCore(commands.Cog):
                     except Exception as e:
                         print(f"⚠️ [RADIO] Capa 1 falló: {e}", flush=True)
 
-                    # Capa 2: Artistas del mismo género (usando los géneros oficiales del artista y búsqueda por género)
+                    # Capa 2: Artistas de géneros similares (usando los géneros expandidos oficiales del artista)
                     if len(recommended_titles) < 5 and seed_artist_id:
                         try:
                             artist_info = self.sp.artist(seed_artist_id)
                             genres = artist_info.get('genres', [])
-                            print(f"📻 [RADIO DEBUG] Capa 2 (géneros de id:{seed_artist_id}): {genres}", flush=True)
+                            expanded_genres = self._expand_genres(genres)
+                            print(f"📻 [RADIO DEBUG] Capa 2 (géneros de id:{seed_artist_id}): {genres} -> Ampliado a: {expanded_genres}", flush=True)
                             
-                            if genres:
-                                shuffled_genres = list(genres)
+                            if expanded_genres:
+                                shuffled_genres = list(expanded_genres)
                                 random.shuffle(shuffled_genres)
                                 
                                 for gen_name in shuffled_genres:
@@ -628,6 +667,29 @@ class MusicCore(commands.Cog):
                 return False
 
         return True
+
+    def _expand_genres(self, genres_list: list[str]) -> list[str]:
+        expanded = set()
+        for g in genres_list:
+            g_lower = g.lower().strip()
+            expanded.add(g_lower)
+            # 1. Búsqueda por diccionario exacto
+            if g_lower in GENRE_EXPANSION:
+                expanded.update(GENRE_EXPANSION[g_lower])
+            # 2. Búsqueda por subpalabras (fuzzy expansion)
+            else:
+                if "rock" in g_lower:
+                    expanded.update(["rock en espanol", "latin alternative", "classic rock"])
+                if "hip hop" in g_lower or "rap" in g_lower:
+                    expanded.update(["latin hip hop", "boom bap", "spanish hip hop"])
+                if "pop" in g_lower:
+                    expanded.update(["latin pop", "indie pop", "synthpop"])
+                if "reggaeton" in g_lower or "trap" in g_lower or "urban" in g_lower:
+                    expanded.update(["urbano latino", "trap latino", "reggaeton"])
+                if "metal" in g_lower:
+                    expanded.update(["heavy metal", "thrash metal", "hard rock"])
+        return list(expanded)
+
 
     # ==============================================================================
     # COMANDOS DE DISCORD
