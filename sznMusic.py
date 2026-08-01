@@ -857,9 +857,9 @@ class MusicCore(commands.Cog):
             self.voice_client.resume()
             await ctx.send("▶️ Reproducción reanudada.")
 
-    @commands.command()
+    @commands.command(name="stop", aliases=["disconnect", "leave", "exit", "dc"])
     async def stop(self, ctx):
-        """Detiene la música y limpia la cola."""
+        """Detiene la música, desconecta del canal y limpia la cola."""
         self.song_queue.clear()
         self.radio_mode = False
         cleanup_cache()
@@ -868,7 +868,22 @@ class MusicCore(commands.Cog):
             await self.voice_client.disconnect()
             self.voice_client = None
         self.current_song = None
-        await ctx.send("🛑 Reproducción detenida y cola limpiada.")
+        await ctx.send("🛑 Reproducción detenida, bot desconectado y cola limpiada.")
+
+    @commands.command(name="clear", aliases=["clean", "cq"])
+    async def clear(self, ctx):
+        """Limpia la cola de canciones sin detener la reproducción actual."""
+        if not self.song_queue:
+            await ctx.send("⚠️ La cola ya está vacía.")
+            return
+        
+        # Eliminar caché de los temas de la cola
+        for song in self.song_queue:
+            cleanup_cache(song)
+            
+        self.song_queue.clear()
+        self.schedule_queue_optimizations()
+        await ctx.send("🧹 Cola de canciones vaciada (la canción actual continuará sonando).")
 
     @commands.command()
     async def shuffle(self, ctx):
