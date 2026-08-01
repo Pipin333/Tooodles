@@ -806,7 +806,11 @@ class MusicCore(commands.Cog):
                 search_q = f"artist:{extracted_artist} track:{clean_song}" if extracted_artist else clean_song
                 res = self.sp.search(q=search_q, type='track', limit=1)
                 if res and res.get('tracks', {}).get('items'):
-                    artist_id = res['tracks']['items'][0]['artists'][0]['id']
+                    track_data = res['tracks']['items'][0]
+                    artist_id = track_data['artists'][0]['id']
+                    spotify_id = track_data['id']
+                    popularity = track_data.get('popularity', 0)
+
                     if not hasattr(self, 'recent_artist_ids'):
                         self.recent_artist_ids = []
                     # Evitar duplicados consecutivos y mantener máximo 5
@@ -816,7 +820,23 @@ class MusicCore(commands.Cog):
                         self.recent_artist_ids.append(artist_id)
                         if len(self.recent_artist_ids) > 5:
                             self.recent_artist_ids.pop(0)
-                        print(f"📻 [RADIO PROFILE] Artista registrado: {res['tracks']['items'][0]['artists'][0]['name']} (Total: {len(self.recent_artist_ids)})", flush=True)
+                        print(f"📻 [RADIO PROFILE] Artista registrado: {track_data['artists'][0]['name']} (Total: {len(self.recent_artist_ids)})", flush=True)
+
+                    # Obtener los géneros del artista para telemetría
+                    try:
+                        artist_info = self.sp.artist(artist_id)
+                        genres_list = artist_info.get('genres', [])
+                        genres_str = ",".join(genres_list) if genres_list else ""
+                        
+                        from database import update_song_features
+                        update_song_features(
+                            title=title,
+                            spotify_id=spotify_id,
+                            genres=genres_str,
+                            popularity=popularity
+                        )
+                    except Exception as meta_err:
+                        print(f"⚠️ Error al guardar metadatos de telemetría de recomendación en BD: {meta_err}", flush=True)
             except Exception as e:
                 print(f"⚠️ Error registrando artista reciente para radio: {e}", flush=True)
         self.bot.loop.create_task(_async_lookup())

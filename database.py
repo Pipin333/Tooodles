@@ -35,6 +35,9 @@ class Song(Base):
     artist = Column(String, index=True)
     duration = Column(Integer)
     played_count = Column(Integer, default=0, index=True)
+    spotify_id = Column(String, index=True)
+    genres = Column(String)  # Guardado como string separado por comas
+    popularity = Column(Integer)
 
     def __repr__(self):
         return f"<Song(id={self.id}, title={self.title}, artist={self.artist}, played_count={self.played_count})>"
@@ -86,8 +89,33 @@ def get_db_session():
         session.close()
 
 def setup_database():
-    """Crea todas las tablas si no existen."""
+    """Crea todas las tablas si no existen y maneja migraciones de columnas."""
+    from sqlalchemy import text
     Base.metadata.create_all(engine)
+    
+    # Manejar migración de nuevas columnas para la tabla 'songs' de forma segura
+    with engine.connect() as conn:
+        # 1. spotify_id
+        try:
+            conn.execute(text("ALTER TABLE songs ADD COLUMN spotify_id VARCHAR"))
+            print("🗄️ Columna 'spotify_id' agregada exitosamente a 'songs'.")
+        except Exception:
+            pass  # La columna ya existe
+            
+        # 2. genres
+        try:
+            conn.execute(text("ALTER TABLE songs ADD COLUMN genres VARCHAR"))
+            print("🗄️ Columna 'genres' agregada exitosamente a 'songs'.")
+        except Exception:
+            pass  # La columna ya existe
+            
+        # 3. popularity
+        try:
+            conn.execute(text("ALTER TABLE songs ADD COLUMN popularity INTEGER"))
+            print("🗄️ Columna 'popularity' agregada exitosamente a 'songs'.")
+        except Exception:
+            pass  # La columna ya existe
+            
     print("🗄️ Tablas de base de datos creadas/verificadas correctamente.")
 
 def add_or_update_song(title, url=None, artist=None, duration=0):
@@ -160,3 +188,15 @@ def log_play_event(title, artist, duration, user_id, username, guild_id, listene
         )
         session.add(log_entry)
         print(f"📊 [DATABASE] Telemetría registrada para '{title}' por @{username}. (Completada: {completed})", flush=True)
+
+def update_song_features(title, spotify_id=None, genres=None, popularity=None):
+    """Actualiza los metadatos de recomendación de una canción existente."""
+    with get_db_session() as session:
+        song = session.query(Song).filter_by(title=title).first()
+        if song:
+            if spotify_id:
+                song.spotify_id = spotify_id
+            if genres:
+                song.genres = genres
+            if popularity is not None:
+                song.popularity = popularity
