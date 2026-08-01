@@ -208,6 +208,12 @@ class MusicCore(commands.Cog):
         try:
             print(f"🔊 Conectando al canal de voz: {target_channel.name}...")
             self.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
+            
+            # Cargar el modo radio por defecto al conectar
+            from sznUtils import load_config
+            default_radio = load_config(f"default_radio_{ctx.guild.id}")
+            self.radio_mode = (default_radio == "on")
+            
             return self.voice_client
         except Exception as e:
             print(f"❌ Error de conexión al canal de voz: {e}")

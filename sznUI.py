@@ -385,33 +385,122 @@ class MusicUI(commands.Cog):
 
     @commands.command(name="settings", aliases=["config"])
     async def settings_dashboard(self, ctx):
-        """Muestra el panel general de configuración del servidor."""
-        from sznUtils import load_config
+        """Muestra el panel interactivo de configuración del servidor (Solo Admin)."""
         core = self.bot.get_cog("MusicCore")
-        
-        guild_id = ctx.guild.id
-        cmd_channel = load_config(f"cmd_channel_{guild_id}")
-        cmd_channel_val = f"<#{cmd_channel}>" if cmd_channel else "`Cualquier canal`"
-        
-        # Modo radio por defecto
-        # (El bot inicia con radio_mode inactivo por defecto para recolectar datos)
-        radio_mode_val = "`Activo`" if core and getattr(core, 'radio_mode', False) else "`Inactivo (Por defecto)`"
-        
-        # Vibe profile
-        vibe_size = len(getattr(core, 'recent_artist_ids', [])) if core else 0
-        
-        embed = discord.Embed(
-            title=f"⚙️ Ajustes de Tooodles - {ctx.guild.name}",
-            color=0x7d5fff
-        )
-        
-        embed.add_field(name="⌨️ Prefijo del Bot", value="`td?`", inline=True)
-        embed.add_field(name="🔒 Canal de Comandos", value=cmd_channel_val, inline=True)
-        embed.add_field(name="📻 Modo Radio (Default)", value=radio_mode_val, inline=True)
-        embed.add_field(name="🧬 Historial de Recomendación", value=f"`{vibe_size}/5` artistas registrados", inline=True)
-        
-        embed.set_footer(text="Para cambiar el canal exclusivo, usa td?channel. Para alternar la radio, haz clic en el botón del reproductor.")
-        await ctx.send(embed=embed)
+        if not core:
+            await ctx.send("❌ Módulo de música no encontrado.")
+            return
+
+        view = self.SettingsControls(core, self.bot)
+        await ctx.send(embed=view.get_embed(ctx.guild), view=view)
+
+    class SettingsControls(View):
+        def __init__(self, core, bot):
+            super().__init__(timeout=300)
+            self.core = core
+            self.bot = bot
+            self.update_buttons()
+
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            # Requerir permisos de Administrador para interactuar
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message(
+                    "❌ Solo los **Administradores** pueden modificar la configuración del servidor.", 
+                    ephemeral=True
+                )
+                return False
+            return True
+
+        def get_embed(self, guild):
+            from sznUtils import load_config
+            guild_id = guild.id
+            
+            cmd_channel = load_config(f"cmd_channel_{guild_id}")
+            cmd_channel_val = f"<#{cmd_channel}>" if cmd_channel else "`Cualquier canal`"
+            
+            default_radio = load_config(f"default_radio_{guild_id}")
+            default_radio_val = "`Activo`" if default_radio == "on" else "`Inactivo (Por defecto)`"
+            
+            vibe_size = len(getattr(self.core, 'recent_artist_ids', []))
+            
+            embed = discord.Embed(
+                title=f"⚙️ Ajustes del Servidor - {guild.name}",
+                description="Haz clic en los botones inferiores para cambiar la configuración de forma interactiva.",
+                color=0x7d5fff
+            )
+            embed.add_field(name="⌨️ Prefijo del Bot", value="`td?`", inline=True)
+            embed.add_field(name="🔒 Canal de Comandos", value=cmd_channel_val, inline=True)
+            embed.add_field(name="📻 Radio Default (Al conectar)", value=default_radio_val, inline=True)
+            embed.add_field(name="🧬 Historial de Recomendación", value=f"`{vibe_size}/5` artistas registrados", inline=True)
+            return embed
+
+        def update_buttons(self):
+            # Obtener estados actuales de la base de datos de forma dinámica
+            from sznUtils import load_config
+            guild_id = self.core.bot.guilds[0].id if self.core.bot.guilds else 0
+            
+            # Encontrar y actualizar botones
+            for child in self.children:
+                if getattr(child, 'custom_id', None) == 'toggle_channel':
+                    # Si ya está bloqueado
+                    cmd_channel = load_config(f"cmd_channel_{guild_id}")
+                    if cmd_channel:
+                        child.style = discord.ButtonStyle.danger
+                        child.label = "🔓 Liberar Canal"
+                    else:
+                        child.style = discord.ButtonStyle.primary
+                        child.label = "🔒 Fijar Canal Aquí"
+                        
+                elif getattr(child, 'custom_id', None) == 'toggle_default_radio':
+                    default_radio = load_config(f"default_radio_{guild_id}")
+                    if default_radio == "on":
+                        child.style = discord.ButtonStyle.success
+                        child.label = "📻 Radio Default: On"
+                    else:
+                        child.style = discord.ButtonStyle.secondary
+                        child.label = "📻 Radio Default: Off"
+
+        @discord.ui.button(label="Fijar Canal", style=discord.ButtonStyle.primary, custom_id="toggle_channel")
+        async def toggle_channel(self, interaction: discord.Interaction, button: Button):
+            from sznUtils import save_config, load_config
+            guild_id = interaction.guild.id
+            config_key = f"cmd_channel_{guild_id}"
+            
+            current_channel = load_config(config_key)
+            if current_channel:
+                # Desbloquear canal
+                save_config(config_key, "")
+                confirm_msg = "🔓 Se ha desactivado la restricción de canal. El bot responderá en cualquier lado."
+            else:
+                # Bloquear a este canal
+                save_config(config_key, str(interaction.channel.id))
+                confirm_msg = f"🔒 Canal exclusivo fijado a <#{interaction.channel.id}>."
+                
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(interaction.guild), view=self)
+            await interaction.followup.send(confirm_msg, ephemeral=True)
+
+        @discord.ui.button(label="Radio Default", style=discord.ButtonStyle.secondary, custom_id="toggle_default_radio")
+        async def toggle_default_radio(self, interaction: discord.Interaction, button: Button):
+            from sznUtils import save_config, load_config
+            guild_id = interaction.guild.id
+            config_key = f"default_radio_{guild_id}"
+            
+            current_default = load_config(config_key)
+            if current_default == "on":
+                save_config(config_key, "off")
+                confirm_msg = "📻 Radio automática por defecto desactivada."
+            else:
+                save_config(config_key, "on")
+                confirm_msg = "📻 Radio automática por defecto activada. El bot iniciará la radio al conectar."
+                
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(interaction.guild), view=self)
+            await interaction.followup.send(confirm_msg, ephemeral=True)
+
+        @discord.ui.button(label="❌ Cerrar", style=discord.ButtonStyle.danger, custom_id="close_settings")
+        async def close_settings(self, interaction: discord.Interaction, button: Button):
+            await interaction.message.delete()
 
 # Limpieza global de cachés
 def cleanup_cache(song_info: dict | None = None):
