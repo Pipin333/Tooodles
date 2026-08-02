@@ -58,59 +58,52 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
     Descarga el stream de audio completo a /tmp/cache_{id}.webm en segundo plano.
     Usa un archivo temporal (.tmp) y lo renombra al finalizar para asegurar
     que FFmpeg nunca lea un archivo truncado (lo que causaría saltos de canción).
-    Solo descarga canciones de menos de 10 minutos (600s).
     """
+    url = song_info.get('url')
     song_id = song_info.get('id')
-    stream_url = song_info.get('url')
     duration = song_info.get('duration', 0)
 
-    if not song_id or not stream_url or not stream_url.startswith("http"):
-        return None
-
-    # No precargar temas de más de 10 minutos para evitar saturación de disco
-    if duration > 600:
+    # Omitir precarga si el tema dura más de 10 minutos (600s) o no tiene URL
+    if not url or not song_id or duration > 600:
         return None
 
     temp_dir = tempfile.gettempdir()
-    cache_path = os.path.join(temp_dir, f"cache_{song_id}.webm")
-    temp_path = os.path.join(temp_dir, f"cache_{song_id}.tmp")
+    final_cache_path = os.path.join(temp_dir, f"cache_{song_id}.webm")
+    temp_cache_path = os.path.join(temp_dir, f"cache_{song_id}.tmp")
 
-    # Si ya existe el archivo completo, usarlo
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        song_info['cache_path'] = cache_path
-        return cache_path
+    if os.path.exists(final_cache_path) and os.path.getsize(final_cache_path) > 1024:
+        return final_cache_path
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    }
+    node_path = "/usr/bin/node"
+    cookie_path = None
+
+    def _download():
+        from yt_dlp import YoutubeDL
+        ydl_opts = {
+            "format": "bestaudio/best/ba",
+            "outtmpl": temp_cache_path,
+            "quiet": True,
+            "nocheckcertificate": True,
+            "cookiefile": cookie_path,
+            "js_runtimes": {"node": {"path": node_path}},
+            "remote_components": ["ejs:github"],
+            "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
+        }
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
 
     try:
-        import aiohttp
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
-            async with session.get(stream_url, timeout=15) as resp:
-                if resp.status == 200:
-                    with open(temp_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(65536):
-                            f.write(chunk)
-                            await asyncio.sleep(0.01)  # Micro-pausa de 10ms para ceder CPU al event loop
-
-                    # Renombrado atómico al completar la descarga
-                    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                        if os.path.exists(cache_path):
-                            try:
-                                os.remove(cache_path)
-                            except Exception:
-                                pass
-                        os.rename(temp_path, cache_path)
-                        song_info['cache_path'] = cache_path
-                        print(f"⚡ Audio completo precargado en caché: {cache_path}", flush=True)
-                        return cache_path
+        print(f"⚡ Iniciando descarga completa de audio en segundo plano: {song_info.get('title')}", flush=True)
+        await asyncio.to_thread(_download)
+        if os.path.exists(temp_cache_path) and os.path.getsize(temp_cache_path) > 1024:
+            os.replace(temp_cache_path, final_cache_path)
+            print(f"⚡ Audio completo precargado en caché: {final_cache_path}", flush=True)
+            return final_cache_path
     except Exception as e:
-        print(f"⚠️ Error al precargar audio para {song_id}: {e}", flush=True)
-        if os.path.exists(temp_path):
+        print(f"⚠️ Precarga de audio completa falló: {e}", flush=True)
+        if os.path.exists(temp_cache_path):
             try:
-                os.remove(temp_path)
+                os.remove(temp_cache_path)
             except Exception:
                 pass
 
@@ -154,9 +147,10 @@ def fuzzy_find_songs(query: str, song_list: list[dict], limit: int = 10) -> list
     return matched
 
 
-class MusicCore(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
+class GuildPlayer:
+    """Encapsula el estado de reproducción y cola de un servidor individual."""
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
         self.song_queue = []
         self.current_song = None
         self.voice_client = None
@@ -164,6 +158,18 @@ class MusicCore(commands.Cog):
         self.radio_mode = False
         self.radio_temperature = 0.75
         self.is_loading_song = False
+        self.recent_artist_ids = []
+        self.last_played_title = None
+        self.last_ctx = None
+        self.current_song_start_time = 0
+        self.current_song_skipped = False
+        self.radio_history = []
+
+
+class MusicCore(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.players = {}  # guild_id -> GuildPlayer
 
         try:
             if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
@@ -185,6 +191,21 @@ class MusicCore(commands.Cog):
         except Exception as e:
             print(f"❌ Error al iniciar inactivity_check: {e}")
 
+    def get_player(self, target) -> GuildPlayer:
+        """Obtiene o crea la instancia de GuildPlayer asociada al servidor."""
+        if isinstance(target, int):
+            guild_id = target
+        elif hasattr(target, 'guild') and target.guild:
+            guild_id = target.guild.id
+        elif hasattr(target, 'id'):
+            guild_id = target.id
+        else:
+            guild_id = 0
+
+        if guild_id not in self.players:
+            self.players[guild_id] = GuildPlayer(guild_id)
+        return self.players[guild_id]
+
     def format_duration(self, seconds):
         if not seconds:
             return "EN VIVO"
@@ -198,39 +219,41 @@ class MusicCore(commands.Cog):
             return None
 
         target_channel = ctx.author.voice.channel
+        player = self.get_player(ctx)
 
         if ctx.guild.voice_client:
-            self.voice_client = ctx.guild.voice_client
-            if self.voice_client.channel != target_channel:
-                await self.voice_client.move_to(target_channel)
-            return self.voice_client
+            player.voice_client = ctx.guild.voice_client
+            if player.voice_client.channel != target_channel:
+                await player.voice_client.move_to(target_channel)
+            return player.voice_client
 
         try:
-            print(f"🔊 Conectando al canal de voz: {target_channel.name}...")
-            self.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
+            print(f"🔊 Conectando al canal de voz: {target_channel.name} en {ctx.guild.name}...")
+            player.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
             
             # Cargar el modo radio por defecto al conectar
             from sznUtils import load_config
             default_radio = load_config(f"default_radio_{ctx.guild.id}")
-            self.radio_mode = (default_radio == "on")
+            player.radio_mode = (default_radio == "on")
             
-            return self.voice_client
+            return player.voice_client
         except Exception as e:
             print(f"❌ Error de conexión al canal de voz: {e}")
             await ctx.send("❌ Error al conectar al canal de voz.")
             return None
 
-    def schedule_queue_optimizations(self):
+    def schedule_queue_optimizations(self, target):
         """
-        Estrategia Híbrida de Rendimiento:
-        - Canción 2 (Siguiente en cola): Si no tiene URL, se resuelve en segundo plano y luego se precarga a disco.
+        Estrategia Híbrida de Rendimiento Multi-servidor:
+        - Canción 2 (Siguiente en cola): Precarga a disco en segundo plano.
         - Canciones 3 en adelante: Pre-resolución de URLs en segundo plano.
         """
-        if not self.song_queue:
+        player = self.get_player(target)
+        if not player.song_queue:
             return
 
         # 1. Optimizar Canción 2 (siguiente en sonar)
-        next_song = self.song_queue[0]
+        next_song = player.song_queue[0]
         if not next_song.get('cache_path'):
             async def _optimize_next(s=next_song):
                 try:
@@ -244,7 +267,7 @@ class MusicCore(commands.Cog):
             self.bot.loop.create_task(_optimize_next())
 
         # 2. Pre-resolver canciones 3 en adelante
-        for song in self.song_queue[1:]:
+        for song in player.song_queue[1:]:
             if not song.get('url'):
                 async def _preresolve(s=song):
                     try:
@@ -255,6 +278,7 @@ class MusicCore(commands.Cog):
                 self.bot.loop.create_task(_preresolve())
 
     async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada"):
+        player = self.get_player(ctx)
         song_info['origin'] = origin
         if ctx:
             if ctx.author:
@@ -264,12 +288,12 @@ class MusicCore(commands.Cog):
                 song_info['guild_id'] = str(ctx.guild.id)
         
         # Insertar canciones del usuario antes de las canciones recomendadas por la radio
-        insert_idx = len(self.song_queue)
-        for idx, song in enumerate(self.song_queue):
+        insert_idx = len(player.song_queue)
+        for idx, song in enumerate(player.song_queue):
             if song.get('origin') == "📻 Radio Automática":
                 insert_idx = idx
                 break
-        self.song_queue.insert(insert_idx, song_info)
+        player.song_queue.insert(insert_idx, song_info)
 
         try:
             add_or_update_song(song_info['title'], song_info.get('id') or song_info['title'], duration=song_info.get('duration', 0))
@@ -278,14 +302,16 @@ class MusicCore(commands.Cog):
 
         await ctx.send(f"🎶 Añadido a la cola: **{song_info['title']}** ({self.format_duration(song_info.get('duration', 0))})")
 
-        is_busy = self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused())
-        if not self.current_song and not is_busy:
+        vc = player.voice_client
+        is_busy = vc and (vc.is_playing() or vc.is_paused())
+        if not player.current_song and not is_busy:
             await self.play_next(ctx)
         else:
-            self.schedule_queue_optimizations()
+            self.schedule_queue_optimizations(ctx)
 
     async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
-        self.is_loading_song = True
+        player = self.get_player(ctx)
+        player.is_loading_song = True
         try:
             info = await extract_info(query)
             await self.add_song_dict(ctx, info, origin)
@@ -293,7 +319,7 @@ class MusicCore(commands.Cog):
             print(f"❌ Error interno en la búsqueda/extracción: {e}", flush=True)
             await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
         finally:
-            self.is_loading_song = False
+            player.is_loading_song = False
 
     async def add_from_spotify(self, ctx, url):
         if not self.sp:
@@ -313,6 +339,7 @@ class MusicCore(commands.Cog):
             await ctx.send("❌ La API de Spotify no está configurada.")
             return
         try:
+            player = self.get_player(ctx)
             playlist_id = url.split("/")[-1].split("?")[0]
             results = self.sp.playlist_tracks(playlist_id)
             items = results.get('items', [])
@@ -323,7 +350,7 @@ class MusicCore(commands.Cog):
             valid_items = [i for i in items if i.get('track')]
             await ctx.send(f"⚡ Carga ultrarrápida de playlist Spotify ({len(valid_items)} canciones)...")
 
-            # 1. Resolver y reproducir el tema 1 de inmediato (<400ms)
+            # 1. Resolver y reproducir el tema 1 de inmediato
             first_track = valid_items[0]['track']
             first_query = f"{first_track['name']} {first_track['artists'][0]['name']}"
             await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist por {ctx.author.name}")
@@ -342,71 +369,68 @@ class MusicCore(commands.Cog):
                     'username': ctx.author.name if ctx and ctx.author else None,
                     'guild_id': str(ctx.guild.id) if ctx and ctx.guild else None
                 }
-                # Insertar canciones del usuario antes de las canciones recomendadas por la radio
-                insert_idx = len(self.song_queue)
-                for idx, song in enumerate(self.song_queue):
+                insert_idx = len(player.song_queue)
+                for idx, song in enumerate(player.song_queue):
                     if song.get('origin') == "📻 Radio Automática":
                         insert_idx = idx
                         break
-                self.song_queue.insert(insert_idx, song_dict)
+                player.song_queue.insert(insert_idx, song_dict)
 
-            # 3. Disparar pre-resolución de los siguientes temas en segundo plano
-            self.schedule_queue_optimizations()
+            # 3. Disparar pre-resolución en segundo plano
+            self.schedule_queue_optimizations(ctx)
 
         except Exception as e:
             print(f"❌ Error al procesar playlist de Spotify: {e}", flush=True)
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
 
     async def play_next(self, ctx):
-        self.last_ctx = ctx
-        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+        player = self.get_player(ctx)
+        player.last_ctx = ctx
+
+        if player.voice_client and (player.voice_client.is_playing() or player.voice_client.is_paused()):
             return
 
-        # Si el modo radio está activo y la cola tiene menos de 2 canciones, rellenar 5 más automáticamente
-        if getattr(self, 'radio_mode', False) and len(self.song_queue) < 2:
+        if getattr(player, 'radio_mode', False) and len(player.song_queue) < 2:
             await self.expand_radio_queue(ctx)
 
-        if not self.song_queue:
+        if not player.song_queue:
             await ctx.send("📭 La cola de canciones está vacía.")
-            self.current_song = None
+            player.current_song = None
             return
 
-        next_item = self.song_queue.pop(0)
+        next_item = player.song_queue.pop(0)
         if not next_item or not isinstance(next_item, dict):
-            self.current_song = None
+            player.current_song = None
             return await self.play_next(ctx)
 
-        self.current_song = next_item
-        # Registrar el artista en el perfil musical de la radio
-        self.record_played_track(self.current_song.get('title', ''))
+        player.current_song = next_item
+        self.record_played_track(player.current_song.get('title', ''), ctx)
 
-        # Notificar a UI
         ui = self.bot.get_cog("MusicUI")
-        if ui and self.current_song:
-            await ui.notify_now_playing(ctx, self.current_song)
+        if ui and player.current_song:
+            await ui.notify_now_playing(ctx, player.current_song)
 
         musicdb = getattr(self.bot, "musicdb", None)
-        if musicdb and self.current_song.get('title'):
-            musicdb.log_song(self.current_song['title'])
+        if musicdb and player.current_song.get('title'):
+            musicdb.log_song(player.current_song['title'])
 
-        # Ejecutar estrategia de optimización para los siguientes temas en la cola
-        self.schedule_queue_optimizations()
+        self.schedule_queue_optimizations(ctx)
 
-        if not self.current_song.get('url') and not self.current_song.get('cache_path'):
+        if not player.current_song.get('url') and not player.current_song.get('cache_path'):
             try:
-                resolved = await extract_info(self.current_song.get('title', ''))
+                resolved = await extract_info(player.current_song.get('title', ''))
                 if resolved:
-                    self.current_song.update(resolved)
+                    player.current_song.update(resolved)
                 else:
                     raise RuntimeError("Failed to resolve stream url.")
             except Exception as e:
                 print(f"⚠️ Error al resolver tema de cola: {e}", flush=True)
-                self.current_song = None
+                player.current_song = None
                 return await self.play_next(ctx)
 
-        target_path = self.current_song.get('cache_path')
+        target_path = player.current_song.get('cache_path')
         if not target_path or not os.path.exists(target_path):
-            target_path = self.current_song.get('url')
+            target_path = player.current_song.get('url')
 
         before_opts = '-probesize 32k -analyzeduration 0'
         if target_path and target_path.startswith("http"):
@@ -417,23 +441,22 @@ class MusicCore(commands.Cog):
             if error:
                 print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
 
-            # Registrar telemetría / estadísticas
-            if self.current_song:
+            if player.current_song:
                 try:
-                    start_time = getattr(self, 'current_song_start_time', None)
+                    start_time = getattr(player, 'current_song_start_time', None)
                     listened_duration = int(time.time() - start_time) if start_time else 0
                     
-                    skipped = getattr(self, 'current_song_skipped', False)
+                    skipped = getattr(player, 'current_song_skipped', False)
                     completed = not skipped
                     
                     from database import log_play_event
                     log_play_event(
-                        title=self.current_song.get('title'),
-                        artist=self.current_song.get('uploader') or self.current_song.get('title'),
-                        duration=self.current_song.get('duration', 0),
-                        user_id=self.current_song.get('user_id'),
-                        username=self.current_song.get('username') or "Desconocido",
-                        guild_id=self.current_song.get('guild_id'),
+                        title=player.current_song.get('title'),
+                        artist=player.current_song.get('uploader') or player.current_song.get('title'),
+                        duration=player.current_song.get('duration', 0),
+                        user_id=player.current_song.get('user_id'),
+                        username=player.current_song.get('username') or "Desconocido",
+                        guild_id=player.current_song.get('guild_id'),
                         listened_duration=listened_duration,
                         completed=completed,
                         skipped_at=listened_duration if skipped else None
@@ -441,48 +464,37 @@ class MusicCore(commands.Cog):
                 except Exception as db_err:
                     print(f"⚠️ Error al registrar telemetría de reproducción: {db_err}", flush=True)
 
-            if self.current_song and self.current_song.get('title'):
-                self.last_played_title = self.current_song['title']
-                if not hasattr(self, 'radio_history'):
-                    self.radio_history = []
-                self.radio_history.append(self.current_song['title'].lower())
-                if len(self.radio_history) > 30:
-                    self.radio_history.pop(0)
-            cleanup_cache(self.current_song)
-            self.current_song = None
-            self.bot.loop.create_task(self.play_next(ctx))
+            if player.current_song and player.current_song.get('title'):
+                player.last_played_title = player.current_song['title']
+                player.radio_history.append(player.current_song['title'].lower())
+                if len(player.radio_history) > 30:
+                    player.radio_history.pop(0)
+
+            cleanup_cache(player.current_song)
+            player.current_song = None
+            coro = self.play_next(ctx)
+            fut = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"❌ Error en callback after_playing: {e}", flush=True)
 
         try:
-            audio_source = await discord.FFmpegOpusAudio.from_probe(
-                target_path,
-                before_options=before_opts,
-                options=ffmpeg_options
-            )
-        except Exception as opus_err:
-            print(f"ℹ️ Opus probe fallback to PCMAudio: {opus_err}", flush=True)
-            audio_source = discord.FFmpegPCMAudio(
-                target_path,
-                before_options=before_opts,
-                options=ffmpeg_options
-            )
-
-        self.current_song_start_time = time.time()
-        self.current_song_skipped = False
-
-        if self.voice_client and self.voice_client.is_connected():
-            self.voice_client.play(audio_source, after=after_playing)
-        else:
-            await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
+            player.current_song_start_time = time.time()
+            player.current_song_skipped = False
+            audio_source = discord.FFmpegPCMAudio(target_path, before_options=before_opts, options=ffmpeg_options)
+            if player.voice_client and player.voice_client.is_connected():
+                player.voice_client.play(audio_source, after=after_playing)
+            else:
+                await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
+        except Exception as e:
+            print(f"❌ Error al iniciar FFmpeg: {e}", flush=True)
+            player.current_song = None
+            await self.play_next(ctx)
 
     def _clean_title_for_search(self, title: str) -> tuple[str, str | None]:
-        """
-        Limpia un título de YouTube para buscar en Spotify.
-        Retorna (titulo_limpio, artista_extraido_o_None).
-        Ejemplo: 'REO Speedwagon - Keep on Loving You (Video Version)' -> ('Keep on Loving You', 'REO Speedwagon')
-        """
         import re
         clean = title
-        # Eliminar basura de YouTube entre paréntesis/corchetes
         patterns_to_remove = [
             r'\(Official\s*(Music\s*)?Video\)',
             r'\(Video\s*Version\)',
@@ -506,7 +518,6 @@ class MusicCore(commands.Cog):
             clean = re.sub(p, '', clean, flags=re.IGNORECASE)
         clean = clean.strip().rstrip('-').strip()
 
-        # Extraer artista si el formato es "Artista - Canción"
         artist = None
         if ' - ' in clean:
             parts = clean.split(' - ', 1)
@@ -520,57 +531,37 @@ class MusicCore(commands.Cog):
         return clean, artist
 
     async def expand_radio_queue(self, ctx, seed_id: str | None = None, seed_title: str | None = None) -> bool:
-        """
-        Genera 5 canciones recomendadas distintas en lote y las añade a la cola.
-        Usa Spotify search por artista/género como fuente principal.
-        """
-        if not hasattr(self, 'radio_history'):
-            self.radio_history = []
+        player = self.get_player(ctx)
+        target_title = seed_title or getattr(player, 'last_played_title', None)
+        if not target_title and player.current_song:
+            target_title = player.current_song.get('title')
 
-        target_title = seed_title or getattr(self, 'last_played_title', None)
-        if not target_title and self.current_song:
-            target_title = self.current_song.get('title')
-
-        # Agregar la canción actual al historial ANTES de buscar, para no recomendarla
-        if self.current_song and self.current_song.get('title'):
-            curr_lower = self.current_song['title'].lower()
-            if curr_lower not in self.radio_history:
-                self.radio_history.append(curr_lower)
+        if player.current_song and player.current_song.get('title'):
+            curr_lower = player.current_song['title'].lower()
+            if curr_lower not in player.radio_history:
+                player.radio_history.append(curr_lower)
         if target_title:
             tt_lower = target_title.lower()
-            if tt_lower not in self.radio_history:
-                self.radio_history.append(tt_lower)
+            if tt_lower not in player.radio_history:
+                player.radio_history.append(tt_lower)
 
-        # También bloquear lo que ya está en cola
-        queued_titles = [s['title'].lower() for s in self.song_queue if s.get('title')]
-
-        # Limpiar título de YouTube para buscar en Spotify
+        queued_titles = [s['title'].lower() for s in player.song_queue if s.get('title')]
         clean_song, extracted_artist = self._clean_title_for_search(target_title) if target_title else ("", None)
 
-        print(f"📻 [RADIO DEBUG] target_title='{target_title}'", flush=True)
-        print(f"📻 [RADIO DEBUG] clean_song='{clean_song}', extracted_artist='{extracted_artist}'", flush=True)
-        print(f"📻 [RADIO DEBUG] radio_history ({len(self.radio_history)}): {self.radio_history[-5:]}", flush=True)
-
+        print(f"📻 [RADIO DEBUG] [{ctx.guild.name}] target_title='{target_title}'", flush=True)
         recommended_titles = []
 
         if self.sp and target_title:
             try:
-                # Búsqueda precisa en Spotify con artista + canción limpios
-                if extracted_artist:
-                    search_q = f"artist:{extracted_artist} track:{clean_song}"
-                else:
-                    search_q = clean_song
-
-                print(f"📻 [RADIO DEBUG] Buscando en Spotify: '{search_q}'", flush=True)
+                search_q = f"artist:{extracted_artist} track:{clean_song}" if extracted_artist else clean_song
                 search_result = self.sp.search(q=search_q, type='track', limit=1)
 
-                seed_artist = extracted_artist  # Usar el artista extraído del título como prioridad
+                seed_artist = extracted_artist
                 seed_artist_id = None
                 if search_result and search_result.get('tracks', {}).get('items'):
                     found_track = search_result['tracks']['items'][0]
                     seed_artist = found_track['artists'][0]['name']
                     seed_artist_id = found_track['artists'][0]['id']
-                    print(f"📻 [RADIO DEBUG] Spotify encontró: '{found_track['name']}' by '{seed_artist}' (id: {seed_artist_id})", flush=True)
                 else:
                     if seed_artist:
                         try:
@@ -578,55 +569,46 @@ class MusicCore(commands.Cog):
                             if artist_res and artist_res.get('artists', {}).get('items'):
                                 seed_artist_id = artist_res['artists']['items'][0]['id']
                                 seed_artist = artist_res['artists']['items'][0]['name']
-                                print(f"📻 [RADIO DEBUG] Spotify encontró ID de artista por nombre: '{seed_artist}' (id: {seed_artist_id})", flush=True)
                         except Exception as e:
                             print(f"⚠️ [RADIO] Búsqueda de artista falló: {e}", flush=True)
 
                 if seed_artist:
-                    # Capa 1: Buscar otras canciones del MISMO artista
+                    # Capa 1: Mismo artista
                     try:
                         artist_search = self.sp.search(q=f"artist:{seed_artist}", type='track', limit=30)
                         artist_tracks = artist_search.get('tracks', {}).get('items', [])
                         random.shuffle(artist_tracks)
-                        print(f"📻 [RADIO DEBUG] Capa 1 (mismo artista '{seed_artist}'): {len(artist_tracks)} tracks", flush=True)
                         for t in artist_tracks:
                             full_name = f"{t['name']} - {t['artists'][0]['name']}"
-                            if self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                            if self._radio_is_unique(player, full_name, recommended_titles, queued_titles):
                                 recommended_titles.append(full_name)
-                                if len(recommended_titles) >= 2:  # Max 2 del mismo artista para variedad
+                                if len(recommended_titles) >= 2:
                                     break
                     except Exception as e:
                         print(f"⚠️ [RADIO] Capa 1 falló: {e}", flush=True)
 
-                    # Capa 2: Artistas de géneros similares (usando los géneros expandidos de artistas recientes)
+                    # Capa 2: Géneros consolidados
                     if len(recommended_titles) < 5:
                         try:
                             genres = []
-                            artist_ids = getattr(self, 'recent_artist_ids', [])
-                            
-                            # 1. Intentar obtener géneros del historial de artistas en lote (batch call)
+                            artist_ids = getattr(player, 'recent_artist_ids', [])
                             if artist_ids:
                                 try:
                                     artists_info = self.sp.artists(artist_ids)
                                     for artist in artists_info.get('artists', []):
                                         if artist and artist.get('genres'):
                                             genres.extend(artist['genres'])
-                                    print(f"📻 [RADIO DEBUG] Perfil de géneros obtenidos del historial ({len(artist_ids)} artistas): {set(genres)}", flush=True)
                                 except Exception as hist_err:
-                                    print(f"⚠️ [RADIO] Error al consultar lote de artistas recientes: {hist_err}", flush=True)
+                                    print(f"⚠️ [RADIO] Error al consultar historial de artistas: {hist_err}", flush=True)
 
-                            # 2. Fallback al artista de la canción actual si el historial está vacío o falló
                             if not genres and seed_artist_id:
                                 try:
                                     artist_info = self.sp.artist(seed_artist_id)
                                     genres = artist_info.get('genres', [])
-                                    print(f"📻 [RADIO DEBUG] Fallback a géneros de artista actual: {genres}", flush=True)
                                 except Exception as fallback_err:
-                                    print(f"⚠️ [RADIO] Error en fallback de artista actual: {fallback_err}", flush=True)
+                                    print(f"⚠️ [RADIO] Error en fallback de artista: {fallback_err}", flush=True)
 
                             expanded_genres = self._expand_genres(list(set(genres)))
-                            print(f"📻 [RADIO DEBUG] Capa 2 (géneros consolidados): {set(genres)} -> Ampliado a: {expanded_genres}", flush=True)
-                            
                             if expanded_genres:
                                 shuffled_genres = list(expanded_genres)
                                 random.shuffle(shuffled_genres)
@@ -634,37 +616,30 @@ class MusicCore(commands.Cog):
                                 for gen_name in shuffled_genres:
                                     if len(recommended_titles) >= 5:
                                         break
-                                    # Buscar canciones en ese género exacto
-                                    search_q_genre = f'genre:"{gen_name}"'
                                     try:
-                                        gen_search = self.sp.search(q=search_q_genre, type='track', limit=20)
+                                        gen_search = self.sp.search(q=f'genre:"{gen_name}"', type='track', limit=20)
                                         gen_tracks = gen_search.get('tracks', {}).get('items', [])
                                         if gen_tracks:
-                                            # Ordenar por popularidad (de 0 a 100) de forma descendente para priorizar éxitos
                                             gen_tracks = sorted(gen_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
-                                            # Tomar los 10 temas más populares y mezclarlos para dar aleatoriedad
                                             popular_subset = gen_tracks[:10]
                                             random.shuffle(popular_subset)
 
                                             for t in popular_subset:
                                                 t_artist = t['artists'][0]['name']
-                                                
-                                                # Evitar repetir artistas en las recomendaciones del mismo lote para variedad absoluta
-                                                already_recommended_artists = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
-                                                if t_artist.lower().strip() in already_recommended_artists:
+                                                already_rec = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
+                                                if t_artist.lower().strip() in already_rec:
                                                     continue
 
                                                 full_name = f"{t['name']} - {t_artist}"
-                                                if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                                if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(player, full_name, recommended_titles, queued_titles):
                                                     recommended_titles.append(full_name)
-                                                    print(f"📻 [RADIO DEBUG] Añadido tema por género '{gen_name}': '{full_name}' (Popularidad: {t.get('popularity')})", flush=True)
-                                                    break # Solo 1 tema por género para máxima variedad
-                                    except Exception as gen_search_err:
-                                        print(f"⚠️ [RADIO] Búsqueda de track para género {gen_name} falló: {gen_search_err}", flush=True)
+                                                    break
+                                    except Exception:
+                                        pass
                         except Exception as artist_info_err:
-                            print(f"⚠️ [RADIO] Error general procesando géneros consolidados: {artist_info_err}", flush=True)
+                            print(f"⚠️ [RADIO] Error procesando géneros: {artist_info_err}", flush=True)
 
-                    # Capa 3: Búsquedas de texto genéricas como fallback si aún no tenemos 5
+                    # Capa 3: Similar queries
                     if len(recommended_titles) < 5:
                         similar_queries = [
                             f"{seed_artist} similar artists",
@@ -678,102 +653,87 @@ class MusicCore(commands.Cog):
                                 sim_results = self.sp.search(q=sq, type='track', limit=20)
                                 sim_tracks = sim_results.get('tracks', {}).get('items', [])
                                 if sim_tracks:
-                                    # Ordenar por popularidad
                                     sim_tracks = sorted(sim_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
                                     popular_subset = sim_tracks[:10]
                                     random.shuffle(popular_subset)
 
-                                    print(f"📻 [RADIO DEBUG] Capa 3 ('{sq}'): {len(sim_tracks)} tracks", flush=True)
                                     for t in popular_subset:
                                         t_artist = t['artists'][0]['name']
-                                        
-                                        # Evitar repetir artistas
-                                        already_recommended_artists = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
-                                        if t_artist.lower().strip() in already_recommended_artists:
+                                        already_rec = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
+                                        if t_artist.lower().strip() in already_rec:
                                             continue
 
                                         full_name = f"{t['name']} - {t_artist}"
-                                        if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(full_name, recommended_titles, queued_titles):
+                                        if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(player, full_name, recommended_titles, queued_titles):
                                             recommended_titles.append(full_name)
-                                            break # 1 por query para variedad
-                            except Exception as e:
-                                print(f"⚠️ [RADIO] Capa 3 falló para '{sq}': {e}", flush=True)
-
+                                            break
+                            except Exception:
+                                pass
             except Exception as sp_err:
                 print(f"⚠️ [RADIO] Error general de Spotify: {sp_err}", flush=True)
 
-        # Fallback: canciones de la Base de Datos (orden aleatorio)
+        # Fallback BD
         if len(recommended_titles) < 5:
-            print(f"📻 [RADIO DEBUG] Fallback a BD (tenemos {len(recommended_titles)} de Spotify)", flush=True)
             with get_db_session() as session:
                 songs = session.query(Song).all()
                 if songs:
                     shuffled_db = list(songs)
                     random.shuffle(shuffled_db)
                     for s in shuffled_db:
-                        if self._radio_is_unique(s.title, recommended_titles, queued_titles):
+                        if self._radio_is_unique(player, s.title, recommended_titles, queued_titles):
                             recommended_titles.append(s.title)
                             if len(recommended_titles) >= 5:
                                 break
 
         if not recommended_titles:
             await ctx.send("⚠️ No se pudieron generar recomendaciones para la radio.")
-            self.radio_mode = False
+            player.radio_mode = False
             return False
 
-        print(f"📻 [RADIO DEBUG] Recomendaciones finales: {recommended_titles}", flush=True)
         await ctx.send(f"📻 **Radio Automática**: Añadidos **{len(recommended_titles)}** temas sugeridos a la cola.")
 
         for title in recommended_titles:
-            self.radio_history.append(title.lower())
-            if len(self.radio_history) > 30:
-                self.radio_history.pop(0)
+            player.radio_history.append(title.lower())
+            if len(player.radio_history) > 30:
+                player.radio_history.pop(0)
 
             song_dict = {
                 'title': title,
                 'url': None,
                 'duration': 0,
                 'uploader': 'Radio Automática',
-                'origin': '📻 Radio Automática'
+                'origin': '📻 Radio Automática',
+                'guild_id': str(ctx.guild.id)
             }
-            self.song_queue.append(song_dict)
+            player.song_queue.append(song_dict)
 
-        self.schedule_queue_optimizations()
+        self.schedule_queue_optimizations(ctx)
         return True
 
-    def _radio_is_unique(self, candidate: str, recommended: list, queued: list) -> bool:
-        """Verifica que un candidato no sea duplicado del historial, cola actual ni recomendaciones ya elegidas."""
+    def _radio_is_unique(self, player: GuildPlayer, candidate: str, recommended: list, queued: list) -> bool:
         c_lower = candidate.lower()
-
-        # Filtrar audiolibros, podcasts, capítulos y ruido no musical
         junk_keywords = [
             "chapter", "episode", "audiobook", "audio book", "podcast",
             "imagination audio", "volume", "vol.", "track", "intro",
             "outro", "skit", "interlude", "remastered"
         ]
         if any(jk in c_lower for jk in junk_keywords):
-            # Si el track es numérico simple como "Chapter 5" o similar, lo descartamos
             return False
 
-        # Extraer solo el nombre de la canción (antes del " - ")
         c_song_name = c_lower.split(" - ")[0].strip() if " - " in c_lower else c_lower
-
         if c_song_name.isdigit():
             return False
 
-        # Verificar contra historial de radio
-        for h in self.radio_history:
+        for h in player.radio_history:
             h_song_name = h.split(" - ")[0].strip() if " - " in h else h
             if c_song_name in h_song_name or h_song_name in c_song_name:
                 return False
 
-        # Verificar contra cola actual
         for q in queued:
             q_song_name = q.split(" - ")[0].strip() if " - " in q else q
             if c_song_name in q_song_name or q_song_name in c_song_name:
                 return False
 
-        # Verificar contra recomendaciones ya elegidas en este batch
         for r in recommended:
             r_lower = r.lower()
             r_song_name = r_lower.split(" - ")[0].strip() if " - " in r_lower else r_lower
@@ -787,10 +747,8 @@ class MusicCore(commands.Cog):
         for g in genres_list:
             g_lower = g.lower().strip()
             expanded.add(g_lower)
-            # 1. Búsqueda por diccionario exacto
             if g_lower in GENRE_EXPANSION:
                 expanded.update(GENRE_EXPANSION[g_lower])
-            # 2. Búsqueda por subpalabras (fuzzy expansion)
             else:
                 if "rock" in g_lower:
                     expanded.update(["rock en espanol", "latin alternative", "classic rock"])
@@ -804,9 +762,11 @@ class MusicCore(commands.Cog):
                     expanded.update(["heavy metal", "thrash metal", "hard rock"])
         return list(expanded)
 
-    def record_played_track(self, title: str):
-        if not self.sp:
+    def record_played_track(self, title: str, target):
+        player = self.get_player(target)
+        if not self.sp or not title:
             return
+
         async def _async_lookup():
             try:
                 clean_song, extracted_artist = self._clean_title_for_search(title)
@@ -818,18 +778,14 @@ class MusicCore(commands.Cog):
                     spotify_id = track_data['id']
                     popularity = track_data.get('popularity', 0)
 
-                    if not hasattr(self, 'recent_artist_ids'):
-                        self.recent_artist_ids = []
-                    # Evitar duplicados consecutivos y mantener máximo 5
-                    if not self.recent_artist_ids or self.recent_artist_ids[-1] != artist_id:
-                        if artist_id in self.recent_artist_ids:
-                            self.recent_artist_ids.remove(artist_id)
-                        self.recent_artist_ids.append(artist_id)
-                        if len(self.recent_artist_ids) > 5:
-                            self.recent_artist_ids.pop(0)
-                        print(f"📻 [RADIO PROFILE] Artista registrado: {track_data['artists'][0]['name']} (Total: {len(self.recent_artist_ids)})", flush=True)
+                    if not player.recent_artist_ids or player.recent_artist_ids[-1] != artist_id:
+                        if artist_id in player.recent_artist_ids:
+                            player.recent_artist_ids.remove(artist_id)
+                        player.recent_artist_ids.append(artist_id)
+                        if len(player.recent_artist_ids) > 5:
+                            player.recent_artist_ids.pop(0)
+                        print(f"📻 [RADIO PROFILE] Artista registrado para guild {player.guild_id}: {track_data['artists'][0]['name']} (Total: {len(player.recent_artist_ids)})", flush=True)
 
-                    # Obtener los géneros del artista para telemetría
                     try:
                         artist_info = self.sp.artist(artist_id)
                         genres_list = artist_info.get('genres', [])
@@ -846,9 +802,8 @@ class MusicCore(commands.Cog):
                         print(f"⚠️ Error al guardar metadatos de telemetría de recomendación en BD: {meta_err}", flush=True)
             except Exception as e:
                 print(f"⚠️ Error registrando artista reciente para radio: {e}", flush=True)
+
         self.bot.loop.create_task(_async_lookup())
-
-
 
     # ==============================================================================
     # COMANDOS DE DISCORD
@@ -871,103 +826,109 @@ class MusicCore(commands.Cog):
     @commands.command(name="s", aliases=["skip"])
     async def skip(self, ctx):
         """Salta la canción actual."""
-        if self.voice_client and self.voice_client.is_playing():
-            self.current_song_skipped = True
-            self.voice_client.stop()
+        player = self.get_player(ctx)
+        if player.voice_client and player.voice_client.is_playing():
+            player.current_song_skipped = True
+            player.voice_client.stop()
             await ctx.send("⏭️ Canción saltada.")
         else:
             await ctx.send("⚠️ No hay ninguna canción reproduciéndose.")
 
-
-
     @commands.command(name="np", aliases=["nowplaying"])
     async def nowplaying(self, ctx):
         """Muestra la canción reproduciéndose actualmente."""
-        if not self.current_song:
+        player = self.get_player(ctx)
+        if not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
 
         embed = discord.Embed(
             title="🎧 Sonando Ahora",
-            description=f"**{self.current_song['title']}**",
+            description=f"**{player.current_song['title']}**",
             color=discord.Color.green()
         )
-        embed.add_field(name="Duración", value=self.format_duration(self.current_song.get('duration', 0)))
-        embed.add_field(name="Origen", value=self.current_song.get('origin', 'Desconocido'))
+        embed.add_field(name="Duración", value=self.format_duration(player.current_song.get('duration', 0)))
+        embed.add_field(name="Origen", value=player.current_song.get('origin', 'Desconocido'))
         await ctx.send(embed=embed)
 
     @commands.command()
     async def pause(self, ctx):
         """Pausa la canción actual."""
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.pause()
+        player = self.get_player(ctx)
+        if player.voice_client and player.voice_client.is_playing():
+            player.voice_client.pause()
             await ctx.send("⏸️ Reproducción pausada.")
 
     @commands.command()
     async def resume(self, ctx):
         """Reanuda la reproducción pausada."""
-        if self.voice_client and self.voice_client.is_paused():
-            self.voice_client.resume()
+        player = self.get_player(ctx)
+        if player.voice_client and player.voice_client.is_paused():
+            player.voice_client.resume()
             await ctx.send("▶️ Reproducción reanudada.")
 
     @commands.command(name="stop", aliases=["disconnect", "leave", "exit", "dc"])
     async def stop(self, ctx):
         """Detiene la música, desconecta del canal y limpia la cola."""
-        self.song_queue.clear()
-        self.radio_mode = False
+        player = self.get_player(ctx)
+        player.song_queue.clear()
+        player.radio_mode = False
         cleanup_cache()
-        if self.voice_client:
-            self.voice_client.stop()
-            await self.voice_client.disconnect()
-            self.voice_client = None
-        self.current_song = None
+        if player.voice_client:
+            player.voice_client.stop()
+            await player.voice_client.disconnect()
+            player.voice_client = None
+        player.current_song = None
         await ctx.send("🛑 Reproducción detenida, bot desconectado y cola limpiada.")
 
     @commands.command(name="clear", aliases=["clean", "cq"])
     async def clear(self, ctx):
         """Limpia la cola de canciones sin detener la reproducción actual."""
-        if not self.song_queue:
+        player = self.get_player(ctx)
+        if not player.song_queue:
             await ctx.send("⚠️ La cola ya está vacía.")
             return
-        
-        # Eliminar caché de los temas de la cola
-        for song in self.song_queue:
+
+        for song in player.song_queue:
             cleanup_cache(song)
-            
-        self.song_queue.clear()
-        self.schedule_queue_optimizations()
+
+        player.song_queue.clear()
+        self.schedule_queue_optimizations(ctx)
         await ctx.send("🧹 Cola de canciones vaciada (la canción actual continuará sonando).")
 
     @commands.command()
     async def shuffle(self, ctx):
         """Mezcla la cola de canciones aleatoriamente."""
-        if not self.song_queue:
+        player = self.get_player(ctx)
+        if not player.song_queue:
             await ctx.send("⚠️ La cola está vacía.")
             return
-        random.shuffle(self.song_queue)
-        self.schedule_queue_optimizations()
+        random.shuffle(player.song_queue)
+        self.schedule_queue_optimizations(ctx)
         await ctx.send("🔀 Cola de canciones mezclada aleatoriamente.")
 
     @commands.command()
     async def remove(self, ctx, index: int):
         """Elimina una canción específica de la cola según su número."""
-        if index < 1 or index > len(self.song_queue):
-            await ctx.send(f"❌ Número fuera de rango. La cola tiene {len(self.song_queue)} canciones.")
+        player = self.get_player(ctx)
+        if index < 1 or index > len(player.song_queue):
+            await ctx.send(f"❌ Número fuera de rango. La cola tiene {len(player.song_queue)} canciones.")
             return
-        removed = self.song_queue.pop(index - 1)
+        removed = player.song_queue.pop(index - 1)
         cleanup_cache(removed)
-        self.schedule_queue_optimizations()
+        self.schedule_queue_optimizations(ctx)
         await ctx.send(f"🗑️ Canción eliminada de la cola: **{removed['title']}**")
 
     @commands.command()
     async def move(self, ctx, old_index: int, new_index: int):
         """Mueve una canción de una posición a otra en la cola."""
-        if old_index < 1 or old_index > len(self.song_queue) or new_index < 1 or new_index > len(self.song_queue):
+        player = self.get_player(ctx)
+        if old_index < 1 or old_index > len(player.song_queue) or new_index < 1 or new_index > len(player.song_queue):
             await ctx.send("❌ Índices fuera de rango.")
             return
-        song = self.song_queue.pop(old_index - 1)
-        self.song_queue.insert(new_index - 1, song)
-        self.schedule_queue_optimizations()
+        song = player.song_queue.pop(old_index - 1)
+        player.song_queue.insert(new_index - 1, song)
+        self.schedule_queue_optimizations(ctx)
         await ctx.send(f"↕️ **{song['title']}** movida de la posición {old_index} a la {new_index}.")
 
     @commands.command()
@@ -981,67 +942,67 @@ class MusicCore(commands.Cog):
 
     @tasks.loop(seconds=120)
     async def inactivity_check(self):
-        if getattr(self, 'is_loading_song', False):
-            return
-        if self.voice_client and not self.voice_client.is_playing() and not getattr(self.voice_client, 'is_paused', lambda: False)() and not self.song_queue:
-            await self.voice_client.disconnect()
-            self.voice_client = None
-            self.current_song = None
-            self.radio_mode = False
-            cleanup_cache()
-            print("✅ Desconectado por inactividad.", flush=True)
-            last_ctx = getattr(self, 'last_ctx', None)
-            if last_ctx:
-                try:
-                    await last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 2 minutos).")
-                except Exception:
-                    pass
+        for guild_id, player in list(self.players.items()):
+            if getattr(player, 'is_loading_song', False):
+                continue
+            vc = player.voice_client
+            if vc and not vc.is_playing() and not getattr(vc, 'is_paused', lambda: False)() and not player.song_queue:
+                await vc.disconnect()
+                player.voice_client = None
+                player.current_song = None
+                player.radio_mode = False
+                cleanup_cache()
+                print(f"✅ Desconectado por inactividad en guild {guild_id}.", flush=True)
+                if player.last_ctx:
+                    try:
+                        await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 2 minutos).")
+                    except Exception:
+                        pass
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
-        # Si el miembro que cambió de canal es el bot
         if member.id == self.bot.user.id:
-            # Si el bot estaba conectado a un canal y ahora ya no lo está
             if before.channel and not after.channel:
-                print("🔌 Desconexión de canal de voz detectada vía evento.", flush=True)
-                self.song_queue.clear()
-                self.radio_mode = False
+                player = self.get_player(member.guild)
+                print(f"🔌 Desconexión de canal de voz detectada vía evento en {member.guild.name}.", flush=True)
+                player.song_queue.clear()
+                player.radio_mode = False
                 cleanup_cache()
-                self.voice_client = None
-                self.current_song = None
+                player.voice_client = None
+                player.current_song = None
                 
-                last_ctx = getattr(self, 'last_ctx', None)
-                if last_ctx:
+                if player.last_ctx:
                     try:
-                        await last_ctx.send("🔌 Me he desconectado del canal de voz (desconexión manual o externa).")
+                        await player.last_ctx.send("🔌 Me he desconectado del canal de voz (desconexión manual o externa).")
                     except Exception:
                         pass
 
     @commands.command()
     async def radio(self, ctx, *, arg: str = "on"):
         """Activa o desactiva el modo radio automática."""
+        player = self.get_player(ctx)
         if arg.lower() in ("off", "stop", "desactivar"):
-            self.radio_mode = False
-            self.radio_seed_id = None
+            player.radio_mode = False
+            player.radio_seed_id = None
             await ctx.send("🛑 Modo radio desactivado.")
             return
 
-        if not self.current_song and not self.song_queue:
+        if not player.current_song and not player.song_queue:
             await ctx.send("⚠️ Debe haber una canción reproduciéndose o en cola para iniciar el modo radio.")
             return
 
-        if getattr(self, 'radio_mode', False):
+        if getattr(player, 'radio_mode', False):
             await ctx.send("📻 El modo radio ya está activo.")
             return
 
-        self.radio_mode = True
-        if self.current_song:
-            self.last_played_title = self.current_song.get('title')
+        player.radio_mode = True
+        if player.current_song:
+            player.last_played_title = player.current_song.get('title')
 
         await ctx.send("📻 **Modo radio activado**. Se generarán 5 recomendaciones a la cola.")
         await self.expand_radio_queue(ctx)
 
-        if self.voice_client and not self.voice_client.is_playing() and not self.voice_client.is_paused():
+        if player.voice_client and not player.voice_client.is_playing() and not player.voice_client.is_paused():
             await self.play_next(ctx)
 
 async def setup(bot):

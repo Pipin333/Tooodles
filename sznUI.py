@@ -1,7 +1,35 @@
 # Archivo que maneja las interfaces de usuario dentro de los mensajes del bot, pensado para Toodles v6.
 import discord
 from discord.ext import commands
-from discord.ui import View, Button
+from discord.ui import View, Button, Modal, TextInput
+
+class PrefixModal(Modal, title="Configurar Prefijo del Bot"):
+    prefix_input = TextInput(
+        label="Nuevo Prefijo (Máx. 5 caracteres)",
+        placeholder="ej: !, $, td?, bot-",
+        min_length=1,
+        max_length=5,
+        required=True
+    )
+
+    def __init__(self, settings_view):
+        super().__init__()
+        self.settings_view = settings_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_prefix = self.prefix_input.value.strip()
+        guild_id = interaction.guild.id
+
+        from sznUtils import save_config
+        save_config(f"prefix_{guild_id}", new_prefix)
+
+        self.settings_view.update_buttons()
+        await interaction.response.edit_message(
+            embed=self.settings_view.get_embed(interaction.guild),
+            view=self.settings_view
+        )
+        await interaction.followup.send(f"✅ El prefijo del bot ha sido cambiado a `{new_prefix}` para este servidor.", ephemeral=True)
+
 
 class MusicUI(commands.Cog):
     def __init__(self, bot):
@@ -23,12 +51,9 @@ class MusicUI(commands.Cog):
         if str(ctx.channel.id) == channel_id_str:
             return True
 
-        # Los comandos 'channel', 'canal' y 'settings' siempre están permitidos en cualquier canal 
-        # para que los administradores puedan configurar o arreglar la vinculación si es necesario.
         if ctx.command.name in ("channel", "canal", "settings"):
             return True
 
-        # Eliminar el comando del usuario e informarle temporalmente
         try:
             await ctx.message.delete(delay=3)
             await ctx.send(
@@ -45,6 +70,7 @@ class MusicUI(commands.Cog):
         if not core:
             return
 
+        player = core.get_player(ctx)
         song_title = song_dict.get('title', 'Canción Desconocida')
         origin = song_dict.get('origin', '🎵 Solicitada')
         duration = song_dict.get('duration', 0)
@@ -54,7 +80,6 @@ class MusicUI(commands.Cog):
 
         duration_str = core.format_duration(duration)
 
-        # Crear un Embed premium al estilo Jockey / Rythm
         is_radio = "radio" in origin.lower()
         embed_color = 0x1db954 if "spotify" in origin.lower() else (0x8a2be2 if is_radio else 0x7d5fff)
         
@@ -64,11 +89,9 @@ class MusicUI(commands.Cog):
             color=embed_color
         )
 
-        # Agregar los campos de metadatos de forma organizada y estética
         embed.add_field(name="👤 Artista", value=f"`{uploader}`", inline=True)
         embed.add_field(name="⏱️ Duración", value=f"`{duration_str}`", inline=True)
         
-        # Pedido por / Generado por
         if username:
             embed.add_field(name="📥 Pedido por", value=f"@{username}", inline=True)
         elif is_radio:
@@ -76,18 +99,14 @@ class MusicUI(commands.Cog):
         else:
             embed.add_field(name="🧬 Origen", value=f"`{origin}`", inline=True)
 
-        # Establecer la portada si existe
         if thumbnail and thumbnail.startswith("http"):
             embed.set_thumbnail(url=thumbnail)
 
-        # Footer con telemetría de recomendador
         vc_name = ctx.author.voice.channel.name if ctx.author.voice else "Canal de voz"
-        vibe_size = len(getattr(core, 'recent_artist_ids', []))
+        vibe_size = len(getattr(player, 'recent_artist_ids', []))
         embed.set_footer(text=f"🔊 VC: {vc_name}  •  🧬 Perfil Radio: {vibe_size}/5 artistas")
 
         view = self.MusicControls(core, ctx)
-        
-        # Agregar botón de enlace directo al canal de texto
         if ctx.guild and ctx.channel:
             view.add_item(Button(
                 label="📜 Ir al chat", 
@@ -108,11 +127,12 @@ class MusicUI(commands.Cog):
             await ctx.send("❌ No se encontró el módulo de música.")
             return
 
-        if not core.current_song:
+        player = core.get_player(ctx)
+        if not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción reproduciéndose en este momento.")
             return
 
-        await self.notify_now_playing(ctx, core.current_song)
+        await self.notify_now_playing(ctx, player.current_song)
 
     class MusicControls(View):
         def __init__(self, core, ctx):
@@ -121,10 +141,14 @@ class MusicUI(commands.Cog):
             self.ctx = ctx
             self.update_radio_button()
 
+        def get_player(self):
+            return self.core.get_player(self.ctx)
+
         def update_radio_button(self):
+            player = self.get_player()
             for child in self.children:
                 if getattr(child, 'custom_id', None) == 'toggle_radio':
-                    if getattr(self.core, 'radio_mode', False):
+                    if getattr(player, 'radio_mode', False):
                         child.style = discord.ButtonStyle.success
                         child.label = "📻 Radio: On"
                     else:
@@ -133,65 +157,63 @@ class MusicUI(commands.Cog):
 
         @discord.ui.button(label="⏯️ Pausa/Reanuda", style=discord.ButtonStyle.primary, custom_id="pause_resume")
         async def pause_resume(self, interaction: discord.Interaction, button: Button):
-            if not self.core or not self.core.voice_client or not self.core.current_song:
+            player = self.get_player()
+            if not player.voice_client or not player.current_song:
                 await interaction.response.send_message("⚠️ No hay nada reproduciéndose.", ephemeral=True)
                 return
             
-            if self.core.voice_client.is_playing():
-                self.core.voice_client.pause()
+            if player.voice_client.is_playing():
+                player.voice_client.pause()
                 await interaction.response.send_message("⏸️ Canción pausada por el usuario.", ephemeral=True)
-            elif self.core.voice_client.is_paused():
-                self.core.voice_client.resume()
+            elif player.voice_client.is_paused():
+                player.voice_client.resume()
                 await interaction.response.send_message("▶️ Canción reanudada por el usuario.", ephemeral=True)
             else:
                 await interaction.response.send_message("⚠️ No hay reproducción activa.", ephemeral=True)
 
         @discord.ui.button(label="⏭️ Saltar", style=discord.ButtonStyle.secondary, custom_id="skip")
         async def skip(self, interaction: discord.Interaction, button: Button):
-            if not self.core or not self.core.voice_client:
+            player = self.get_player()
+            if not player.voice_client:
                 await interaction.response.send_message("⚠️ No hay ninguna reproducción activa.", ephemeral=True)
                 return
                 
-            if self.core.voice_client.is_playing() or self.core.voice_client.is_paused():
-                self.core.current_song_skipped = True
-                self.core.voice_client.stop()
+            if player.voice_client.is_playing() or player.voice_client.is_paused():
+                player.current_song_skipped = True
+                player.voice_client.stop()
                 await interaction.response.send_message("⏭️ Canción saltada vía controles de UI.", ephemeral=True)
             else:
                 await interaction.response.send_message("🎵 La cola está vacía.", ephemeral=True)
 
         @discord.ui.button(label="📻 Radio", style=discord.ButtonStyle.secondary, custom_id="toggle_radio")
         async def toggle_radio(self, interaction: discord.Interaction, button: Button):
-            if not self.core:
-                await interaction.response.defer()
-                return
-
-            self.core.radio_mode = not getattr(self.core, 'radio_mode', False)
+            player = self.get_player()
+            player.radio_mode = not getattr(player, 'radio_mode', False)
             self.update_radio_button()
-            status = "activado" if self.core.radio_mode else "desactivado"
+            status = "activado" if player.radio_mode else "desactivado"
             
-            # Editar el mensaje del player para cambiar el color del botón
             await interaction.response.edit_message(view=self)
             
-            # Si se activa el modo radio y la cola tiene menos de 2 canciones, rellenar de inmediato
-            if self.core.radio_mode and len(self.core.song_queue) < 2:
+            if player.radio_mode and len(player.song_queue) < 2:
                 await self.core.expand_radio_queue(self.ctx)
                 
             await interaction.followup.send(f"📻 Modo radio automático **{status}**.", ephemeral=True)
 
         @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop")
         async def stop(self, interaction: discord.Interaction, button: Button):
-            if self.core and self.core.voice_client:
-                self.core.song_queue.clear()
-                self.core.radio_mode = False
+            player = self.get_player()
+            if player.voice_client:
+                player.song_queue.clear()
+                player.radio_mode = False
+                from sznMusic import cleanup_cache
                 cleanup_cache()
-                if self.core.voice_client:
-                    self.core.voice_client.stop()
-                    await self.core.voice_client.disconnect()
-                    self.core.voice_client = None
-                self.core.current_song = None
+                if player.voice_client:
+                    player.voice_client.stop()
+                    await player.voice_client.disconnect()
+                    player.voice_client = None
+                player.current_song = None
                 await interaction.response.send_message("⏹️ Reproducción detenida y bot desconectado del canal.", ephemeral=True)
                 
-                # Publicar mensaje global en el chat
                 try:
                     await self.ctx.send("🛑 Reproducción detenida, bot desconectado y cola limpiada vía panel de control.")
                 except Exception:
@@ -207,12 +229,13 @@ class MusicUI(commands.Cog):
             await ctx.send("❌ No se encontró el módulo de música.")
             return
 
-        if not core.current_song and not core.song_queue:
+        player = core.get_player(ctx)
+        if not player.current_song and not player.song_queue:
             await ctx.send("📭 La cola de canciones está vacía.")
             return
 
         items_per_page = 10
-        total_songs = len(core.song_queue)
+        total_songs = len(player.song_queue)
         total_pages = max(1, (total_songs + items_per_page - 1) // items_per_page)
         current_page = 0
 
@@ -222,23 +245,21 @@ class MusicUI(commands.Cog):
                 color=0x7d5fff
             )
 
-            # Mostrar canción sonando actualmente
-            if core.current_song:
-                current_title = core.current_song.get('title', 'Desconocido')
-                current_uploader = core.current_song.get('uploader', 'Artista')
-                current_duration = core.format_duration(core.current_song.get('duration', 0))
+            if player.current_song:
+                current_title = player.current_song.get('title', 'Desconocido')
+                current_uploader = player.current_song.get('uploader', 'Artista')
+                current_duration = core.format_duration(player.current_song.get('duration', 0))
                 embed.add_field(
                     name="▶️ Sonando Ahora",
                     value=f"**{current_title}** - `{current_uploader}` `[{current_duration}]`",
                     inline=False
                 )
-                if core.current_song.get('thumbnail') and core.current_song['thumbnail'].startswith("http"):
-                    embed.set_thumbnail(url=core.current_song['thumbnail'])
+                if player.current_song.get('thumbnail') and player.current_song['thumbnail'].startswith("http"):
+                    embed.set_thumbnail(url=player.current_song['thumbnail'])
 
-            # Construir la lista de la cola de la página
             start = page * items_per_page
             end = start + items_per_page
-            songs = core.song_queue[start:end]
+            songs = player.song_queue[start:end]
 
             queue_list = ""
             for i, song in enumerate(songs, start=start + 1):
@@ -256,8 +277,7 @@ class MusicUI(commands.Cog):
                 inline=False
             )
 
-            # Duración total de la cola
-            total_duration = sum(s.get('duration', 0) for s in core.song_queue)
+            total_duration = sum(s.get('duration', 0) for s in player.song_queue)
             total_duration_str = core.format_duration(total_duration)
 
             embed.set_footer(
@@ -385,7 +405,7 @@ class MusicUI(commands.Cog):
 
     @commands.command(name="settings", aliases=["config"])
     async def settings_dashboard(self, ctx):
-        """Muestra el panel interactivo de configuración del servidor (Solo Admin)."""
+        """Muestra el panel interactivo de configuración del servidor."""
         core = self.bot.get_cog("MusicCore")
         if not core:
             await ctx.send("❌ Módulo de música no encontrado.")
@@ -402,7 +422,6 @@ class MusicUI(commands.Cog):
             self.update_buttons()
 
         async def interaction_check(self, interaction: discord.Interaction) -> bool:
-            # Requerir permisos de Administrador para interactuar
             if not interaction.user.guild_permissions.administrator:
                 await interaction.response.send_message(
                     "❌ Solo los **Administradores** pueden modificar la configuración del servidor.", 
@@ -421,28 +440,28 @@ class MusicUI(commands.Cog):
             default_radio = load_config(f"default_radio_{guild_id}")
             default_radio_val = "`Activo`" if default_radio == "on" else "`Inactivo (Por defecto)`"
             
-            vibe_size = len(getattr(self.core, 'recent_artist_ids', []))
+            prefix = load_config(f"prefix_{guild_id}") or "td?"
+            
+            player = self.core.get_player(guild.id)
+            vibe_size = len(getattr(player, 'recent_artist_ids', []))
             
             embed = discord.Embed(
                 title=f"⚙️ Ajustes del Servidor - {guild.name}",
                 description="Haz clic en los botones inferiores para cambiar la configuración de forma interactiva.",
                 color=0x7d5fff
             )
-            embed.add_field(name="⌨️ Prefijo del Bot", value="`td?`", inline=True)
+            embed.add_field(name="⌨️ Prefijo del Bot", value=f"`{prefix}`", inline=True)
             embed.add_field(name="🔒 Canal de Comandos", value=cmd_channel_val, inline=True)
             embed.add_field(name="📻 Radio Default (Al conectar)", value=default_radio_val, inline=True)
             embed.add_field(name="🧬 Historial de Recomendación", value=f"`{vibe_size}/5` artistas registrados", inline=True)
             return embed
 
         def update_buttons(self):
-            # Obtener estados actuales de la base de datos de forma dinámica
             from sznUtils import load_config
             guild_id = self.core.bot.guilds[0].id if self.core.bot.guilds else 0
             
-            # Encontrar y actualizar botones
             for child in self.children:
                 if getattr(child, 'custom_id', None) == 'toggle_channel':
-                    # Si ya está bloqueado
                     cmd_channel = load_config(f"cmd_channel_{guild_id}")
                     if cmd_channel:
                         child.style = discord.ButtonStyle.danger
@@ -460,6 +479,10 @@ class MusicUI(commands.Cog):
                         child.style = discord.ButtonStyle.secondary
                         child.label = "📻 Radio Default: Off"
 
+                elif getattr(child, 'custom_id', None) == 'change_prefix_btn':
+                    prefix = load_config(f"prefix_{guild_id}") or "td?"
+                    child.label = f"✏️ Prefijo: {prefix}"
+
         @discord.ui.button(label="Fijar Canal", style=discord.ButtonStyle.primary, custom_id="toggle_channel")
         async def toggle_channel(self, interaction: discord.Interaction, button: Button):
             from sznUtils import save_config, load_config
@@ -468,11 +491,9 @@ class MusicUI(commands.Cog):
             
             current_channel = load_config(config_key)
             if current_channel:
-                # Desbloquear canal
                 save_config(config_key, "")
                 confirm_msg = "🔓 Se ha desactivado la restricción de canal. El bot responderá en cualquier lado."
             else:
-                # Bloquear a este canal
                 save_config(config_key, str(interaction.channel.id))
                 confirm_msg = f"🔒 Canal exclusivo fijado a <#{interaction.channel.id}>."
                 
@@ -498,33 +519,13 @@ class MusicUI(commands.Cog):
             await interaction.response.edit_message(embed=self.get_embed(interaction.guild), view=self)
             await interaction.followup.send(confirm_msg, ephemeral=True)
 
+        @discord.ui.button(label="✏️ Prefijo: td?", style=discord.ButtonStyle.secondary, custom_id="change_prefix_btn")
+        async def change_prefix_btn(self, interaction: discord.Interaction, button: Button):
+            await interaction.response.send_modal(PrefixModal(self))
+
         @discord.ui.button(label="❌ Cerrar", style=discord.ButtonStyle.danger, custom_id="close_settings")
         async def close_settings(self, interaction: discord.Interaction, button: Button):
             await interaction.message.delete()
-
-# Limpieza global de cachés
-def cleanup_cache(song_info: dict | None = None):
-    import os
-    import tempfile
-    try:
-        if song_info and song_info.get('id'):
-            temp_dir = tempfile.gettempdir()
-            cache_path = os.path.join(temp_dir, f"cache_{song_info['id']}.webm")
-            temp_path = os.path.join(temp_dir, f"cache_{song_info['id']}.tmp")
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        else:
-            temp_dir = tempfile.gettempdir()
-            for fname in os.listdir(temp_dir):
-                if fname.startswith("cache_") and (fname.endswith(".webm") or fname.endswith(".tmp")):
-                    try:
-                        os.remove(os.path.join(temp_dir, fname))
-                    except Exception:
-                        pass
-    except Exception as e:
-        print(f"⚠️ Error durante cleanup de cache: {e}", flush=True)
 
 async def setup(bot):
     await bot.add_cog(MusicUI(bot))

@@ -16,7 +16,16 @@ intents.messages = True
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix='td?', intents=intents, help_command=None)
+def get_prefix(bot, message):
+    if not message.guild:
+        return 'td?'
+    try:
+        custom = load_config(f"prefix_{message.guild.id}")
+        return custom if custom else 'td?'
+    except Exception:
+        return 'td?'
+
+bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
 
 @bot.event
 async def on_ready():
