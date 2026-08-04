@@ -12,6 +12,9 @@ docker stop -t 600 tooodles 2>/dev/null || true
 docker rm tooodles 2>/dev/null || true
 
 echo "▶️ Lanzando nuevo contenedor Tooodles Bot..."
+# Crear el archivo de BD si no existe (touch) y asegurar permisos de lectura/escritura para Docker
+touch "$HOME/Tooodles/tooodles.db"
+chmod 666 "$HOME/Tooodles/tooodles.db"
 docker run -d --name tooodles --restart always --env-file .env \
   -v "$HOME/Tooodles/tooodles.db:/app/tooodles.db" \
   -v "$HOME/Tooodles/cookies.txt:/app/cookies.txt" \

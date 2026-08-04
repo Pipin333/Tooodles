@@ -1081,12 +1081,12 @@ class MusicCore(commands.Cog):
 
         player.song_queue.clear()
         player.radio_mode = False
+        player.current_song = None  # limpiar ANTES de disconnect para que on_voice_state_update no sobreescriba la cola ya guardada
         cleanup_cache()
         if player.voice_client:
             player.voice_client.stop()
             await player.voice_client.disconnect()
             player.voice_client = None
-        player.current_song = None
         await ctx.send("🛑 Reproducción detenida y bot desconectado (la cola fue guardada en BD si la persistencia está activa).")
 
     @commands.command(name="clear", aliases=["clean", "cq"])
