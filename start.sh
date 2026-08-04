@@ -12,7 +12,10 @@ docker stop -t 600 tooodles 2>/dev/null || true
 docker rm tooodles 2>/dev/null || true
 
 echo "▶️ Lanzando nuevo contenedor Tooodles Bot..."
-docker run -d --name tooodles --restart always --env-file .env tooodles-bot
+docker run -d --name tooodles --restart always --env-file .env \
+  -v "$HOME/Tooodles/tooodles.db:/app/tooodles.db" \
+  -v "$HOME/Tooodles/cookies.txt:/app/cookies.txt" \
+  tooodles-bot
 
 echo "📋 Mostrando logs en tiempo real (Ctrl+C para salir)..."
 docker logs -f tooodles
