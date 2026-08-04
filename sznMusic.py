@@ -1163,10 +1163,10 @@ class MusicCore(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
 
-    @tasks.loop(seconds=30)
+    @tasks.loop(seconds=60)
     async def inactivity_check(self):
         for guild_id, player in list(self.players.items()):
-            if getattr(player, 'is_loading_song', False):
+            if getattr(player, 'is_loading_song', False) or getattr(player, 'current_song', None) is not None:
                 continue
             vc = player.voice_client
             if vc and not vc.is_playing() and not getattr(vc, 'is_paused', lambda: False)() and not player.song_queue:
@@ -1178,7 +1178,7 @@ class MusicCore(commands.Cog):
                 print(f"✅ Desconectado por inactividad en guild {guild_id}.", flush=True)
                 if player.last_ctx:
                     try:
-                        await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 30 segundos).")
+                        await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 60 segundos).")
                     except Exception:
                         pass
 
