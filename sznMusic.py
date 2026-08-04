@@ -232,10 +232,20 @@ class MusicCore(commands.Cog):
             player.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
             
             # Cargar el modo radio por defecto al conectar
-            from sznUtils import load_config
+            from sznUtils import load_config, load_guild_queue, is_guild_persist_enabled
             default_radio = load_config(f"default_radio_{ctx.guild.id}")
             player.radio_mode = (default_radio == "on")
             
+            # Restaurar cola persistente si está activada para este servidor
+            if is_guild_persist_enabled(ctx.guild.id) and not player.song_queue:
+                restored = await asyncio.to_thread(load_guild_queue, ctx.guild.id)
+                if restored:
+                    player.song_queue.extend(restored)
+                    await ctx.send(f"📥 **Cola recuperada**: Se restauraron **{len(restored)}** canciones pendientes tras el reinicio.")
+                    self.schedule_queue_optimizations(ctx)
+                    if not player.current_song and not (player.voice_client and player.voice_client.is_playing()):
+                        self.bot.loop.create_task(self.play_next(ctx))
+
             return player.voice_client
         except Exception as e:
             print(f"❌ Error de conexión al canal de voz: {e}")
@@ -266,8 +276,8 @@ class MusicCore(commands.Cog):
                     print(f"⚠️ Error optimizando siguiente canción en cola: {e}", flush=True)
             self.bot.loop.create_task(_optimize_next())
 
-        # 2. Pre-resolver canciones 3 en adelante
-        for song in player.song_queue[1:]:
+        # 2. Pre-resolver un máximo de 4 canciones posteriores para evitar saturación de red / HTTP 429
+        for song in player.song_queue[1:5]:
             if not song.get('url'):
                 async def _preresolve(s=song):
                     try:
@@ -332,8 +342,6 @@ class MusicCore(commands.Cog):
             await self.add_from_youtube(ctx, query, origin=f"🎵 Spotify por {ctx.author.name}")
         except Exception as e:
             print(f"❌ Error al procesar enlace de Spotify: {e}", flush=True)
-            await ctx.send("❌ Error al procesar el enlace de Spotify.")
-
     async def add_playlist_from_spotify(self, ctx, url):
         if not self.sp:
             await ctx.send("❌ La API de Spotify no está configurada.")
@@ -348,14 +356,12 @@ class MusicCore(commands.Cog):
                 return
 
             valid_items = [i for i in items if i.get('track')]
-            await ctx.send(f"⚡ Carga ultrarrápida de playlist Spotify ({len(valid_items)} canciones)...")
+            await ctx.send(f"⚡ Carga de playlist Spotify ({len(valid_items)} canciones)...")
 
-            # 1. Resolver y reproducir el tema 1 de inmediato
             first_track = valid_items[0]['track']
             first_query = f"{first_track['name']} {first_track['artists'][0]['name']}"
             await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist por {ctx.author.name}")
 
-            # 2. Agregar los temas restantes 2..N a la cola de forma instantánea
             for item in valid_items[1:]:
                 track = item['track']
                 title = f"{track['name']} - {track['artists'][0]['name']}"
@@ -376,12 +382,147 @@ class MusicCore(commands.Cog):
                         break
                 player.song_queue.insert(insert_idx, song_dict)
 
-            # 3. Disparar pre-resolución en segundo plano
             self.schedule_queue_optimizations(ctx)
 
         except Exception as e:
             print(f"❌ Error al procesar playlist de Spotify: {e}", flush=True)
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
+
+    async def add_album_from_spotify(self, ctx, url):
+        if not self.sp:
+            await ctx.send("❌ La API de Spotify no está configurada.")
+            return
+        try:
+            player = self.get_player(ctx)
+            album_id = url.split("/")[-1].split("?")[0]
+            album = self.sp.album(album_id)
+            album_name = album.get('name', 'Álbum')
+            tracks = album.get('tracks', {}).get('items', [])
+            if not tracks:
+                await ctx.send("📭 El álbum de Spotify está vacío.")
+                return
+
+            await ctx.send(f"⚡ Carga de álbum Spotify **{album_name}** ({len(tracks)} canciones)...")
+
+            first_track = tracks[0]
+            first_artist = first_track['artists'][0]['name'] if first_track.get('artists') else ''
+            first_query = f"{first_track['name']} {first_artist}".strip()
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Álbum Spotify por {ctx.author.name}")
+
+            for track in tracks[1:]:
+                artist_name = track['artists'][0]['name'] if track.get('artists') else ''
+                title = f"{track['name']} - {artist_name}"
+                song_dict = {
+                    'title': title,
+                    'url': None,
+                    'duration': int(track.get('duration_ms', 0) / 1000),
+                    'uploader': artist_name,
+                    'origin': f"🎵 Álbum Spotify por {ctx.author.name}",
+                    'user_id': str(ctx.author.id) if ctx and ctx.author else None,
+                    'username': ctx.author.name if ctx and ctx.author else None,
+                    'guild_id': str(ctx.guild.id) if ctx and ctx.guild else None
+                }
+                insert_idx = len(player.song_queue)
+                for idx, song in enumerate(player.song_queue):
+                    if song.get('origin') == "📻 Radio Automática":
+                        insert_idx = idx
+                        break
+                player.song_queue.insert(insert_idx, song_dict)
+
+            self.schedule_queue_optimizations(ctx)
+
+        except Exception as e:
+            print(f"❌ Error al procesar álbum de Spotify: {e}", flush=True)
+            await ctx.send("❌ Error al cargar el álbum de Spotify.")
+
+    async def add_artist_from_spotify(self, ctx, url):
+        if not self.sp:
+            await ctx.send("❌ La API de Spotify no está configurada.")
+            return
+        try:
+            player = self.get_player(ctx)
+            artist_id = url.split("/")[-1].split("?")[0]
+            artist = self.sp.artist(artist_id)
+            artist_name = artist.get('name', 'Artista')
+            top_tracks_res = self.sp.artist_top_tracks(artist_id)
+            tracks = top_tracks_res.get('tracks', [])
+            if not tracks:
+                await ctx.send("📭 No se encontraron canciones para este artista.")
+                return
+
+            await ctx.send(f"⚡ Carga de Top Canciones de **{artist_name}** en Spotify ({len(tracks)} canciones)...")
+
+            first_track = tracks[0]
+            first_query = f"{first_track['name']} {artist_name}".strip()
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Top Artista por {ctx.author.name}")
+
+            for track in tracks[1:]:
+                title = f"{track['name']} - {artist_name}"
+                song_dict = {
+                    'title': title,
+                    'url': None,
+                    'duration': int(track.get('duration_ms', 0) / 1000),
+                    'uploader': artist_name,
+                    'origin': f"🎵 Top Artista por {ctx.author.name}",
+                    'user_id': str(ctx.author.id) if ctx and ctx.author else None,
+                    'username': ctx.author.name if ctx and ctx.author else None,
+                    'guild_id': str(ctx.guild.id) if ctx and ctx.guild else None
+                }
+                insert_idx = len(player.song_queue)
+                for idx, song in enumerate(player.song_queue):
+                    if song.get('origin') == "📻 Radio Automática":
+                        insert_idx = idx
+                        break
+                player.song_queue.insert(insert_idx, song_dict)
+
+            self.schedule_queue_optimizations(ctx)
+
+        except Exception as e:
+            print(f"❌ Error al procesar artista de Spotify: {e}", flush=True)
+            await ctx.send("❌ Error al cargar canciones del artista de Spotify.")
+
+    async def add_playlist_from_youtube(self, ctx, url):
+        try:
+            player = self.get_player(ctx)
+            await ctx.send("🔎 Procesando playlist de YouTube / YouTube Music...")
+            
+            from sznUtils import extract_playlist_metadata
+            items = await asyncio.to_thread(extract_playlist_metadata, url)
+            
+            if not items:
+                await ctx.send("📭 No se pudieron extraer canciones de la playlist de YouTube.")
+                return
+
+            await ctx.send(f"⚡ Carga rápida de playlist YouTube ({len(items)} canciones)...")
+
+            first_item = items[0]
+            first_query = first_item.get('url') or first_item.get('title')
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist YouTube por {ctx.author.name}")
+
+            for item in items[1:]:
+                song_dict = {
+                    'title': item['title'],
+                    'url': item.get('url'),
+                    'duration': item.get('duration', 0),
+                    'uploader': item.get('uploader', 'YouTube'),
+                    'origin': f"🎵 Playlist YouTube por {ctx.author.name}",
+                    'user_id': str(ctx.author.id) if ctx and ctx.author else None,
+                    'username': ctx.author.name if ctx and ctx.author else None,
+                    'guild_id': str(ctx.guild.id) if ctx and ctx.guild else None,
+                    'id': item.get('id')
+                }
+                insert_idx = len(player.song_queue)
+                for idx, song in enumerate(player.song_queue):
+                    if song.get('origin') == "📻 Radio Automática":
+                        insert_idx = idx
+                        break
+                player.song_queue.insert(insert_idx, song_dict)
+
+            self.schedule_queue_optimizations(ctx)
+
+        except Exception as e:
+            print(f"❌ Error al procesar playlist de YouTube: {e}", flush=True)
+            await ctx.send("❌ Error al cargar la playlist de YouTube.")
 
     async def play_next(self, ctx):
         player = self.get_player(ctx)
@@ -432,52 +573,63 @@ class MusicCore(commands.Cog):
         if not target_path or not os.path.exists(target_path):
             target_path = player.current_song.get('url')
 
-        before_opts = '-probesize 32k -analyzeduration 0'
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}"'
         if target_path and target_path.startswith("http"):
-            before_opts += ' -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+            before_opts += ' -headers "Referer: https://www.youtube.com/\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
         ffmpeg_options = '-vn -threads 2'
 
         def after_playing(error):
             if error:
                 print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
 
-            if player.current_song:
-                try:
-                    start_time = getattr(player, 'current_song_start_time', None)
-                    listened_duration = int(time.time() - start_time) if start_time else 0
-                    
-                    skipped = getattr(player, 'current_song_skipped', False)
-                    completed = not skipped
-                    
-                    from database import log_play_event
-                    log_play_event(
-                        title=player.current_song.get('title'),
-                        artist=player.current_song.get('uploader') or player.current_song.get('title'),
-                        duration=player.current_song.get('duration', 0),
-                        user_id=player.current_song.get('user_id'),
-                        username=player.current_song.get('username') or "Desconocido",
-                        guild_id=player.current_song.get('guild_id'),
-                        listened_duration=listened_duration,
-                        completed=completed,
-                        skipped_at=listened_duration if skipped else None
-                    )
-                except Exception as db_err:
-                    print(f"⚠️ Error al registrar telemetría de reproducción: {db_err}", flush=True)
+            asyncio.run_coroutine_threadsafe(self._process_after_playing(ctx, player.current_song, getattr(player, 'current_song_start_time', None), getattr(player, 'current_song_skipped', False)), self.bot.loop)
 
-            if player.current_song and player.current_song.get('title'):
-                player.last_played_title = player.current_song['title']
-                player.radio_history.append(player.current_song['title'].lower())
-                if len(player.radio_history) > 30:
-                    player.radio_history.pop(0)
-
-            cleanup_cache(player.current_song)
+        try:
+            player.current_song_start_time = time.time()
+            player.current_song_skipped = False
+            audio_source = discord.FFmpegPCMAudio(target_path, before_options=before_opts, options=ffmpeg_options)
+            if player.voice_client and player.voice_client.is_connected():
+                player.voice_client.play(audio_source, after=after_playing)
+            else:
+                await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
+        except Exception as e:
+            print(f"❌ Error al iniciar FFmpeg: {e}", flush=True)
             player.current_song = None
-            coro = self.play_next(ctx)
-            fut = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+            await self.play_next(ctx)
+
+    async def _process_after_playing(self, ctx, current_song, start_time, skipped):
+        player = self.get_player(ctx)
+        if current_song:
             try:
-                fut.result()
-            except Exception as e:
-                print(f"❌ Error en callback after_playing: {e}", flush=True)
+                listened_duration = int(time.time() - start_time) if start_time else 0
+                completed = not skipped
+                
+                from database import log_play_event
+                await asyncio.to_thread(
+                    log_play_event,
+                    title=current_song.get('title'),
+                    artist=current_song.get('uploader') or current_song.get('title'),
+                    duration=current_song.get('duration', 0),
+                    user_id=current_song.get('user_id'),
+                    username=current_song.get('username') or "Desconocido",
+                    guild_id=current_song.get('guild_id'),
+                    listened_duration=listened_duration,
+                    completed=completed,
+                    skipped_at=listened_duration if skipped else None
+                )
+            except Exception as db_err:
+                print(f"⚠️ Error al registrar telemetría de reproducción: {db_err}", flush=True)
+
+        if current_song and current_song.get('title'):
+            player.last_played_title = current_song['title']
+            player.radio_history.append(current_song['title'].lower())
+            if len(player.radio_history) > 30:
+                player.radio_history.pop(0)
+
+        await asyncio.to_thread(cleanup_cache, current_song)
+        player.current_song = None
+        await self.play_next(ctx)
 
         try:
             player.current_song_start_time = time.time()
@@ -805,23 +957,49 @@ class MusicCore(commands.Cog):
 
         self.bot.loop.create_task(_async_lookup())
 
-    # ==============================================================================
-    # COMANDOS DE DISCORD
-    # ==============================================================================
+    @commands.command(name="join", aliases=["connect", "conectar", "unir", "j"])
+    async def join(self, ctx):
+        """Conecta el bot al canal de voz actual y reanuda la cola de canciones si existe."""
+        if not ctx.author.voice:
+            await ctx.send("❌ ¡Debes estar en un canal de voz para traer al bot!")
+            return
+
+        vc = await self.connect_to_voice(ctx)
+        if vc:
+            player = self.get_player(ctx)
+            if player.song_queue and not player.current_song and not vc.is_playing():
+                await ctx.send(f"🔊 Conectado a **{ctx.author.voice.channel.name}**. Reanudando reproducción de la cola...")
+                await self.play_next(ctx)
+            else:
+                await ctx.send(f"🔊 Conectado a **{ctx.author.voice.channel.name}**.")
 
     @commands.command(name="p", aliases=["play"])
     async def play(self, ctx, *, query: str):
-        """Reproduce una canción de YouTube, Spotify o SoundCloud."""
+        """Reproduce una canción o playlist de YouTube, YouTube Music, Spotify o SoundCloud."""
+        if getattr(self.bot, 'is_draining', False):
+            await ctx.send("⚠️ El bot está aplicando una actualización. Se reiniciará inmediatamente al terminar la canción actual.")
+            return
+
         vc = await self.connect_to_voice(ctx)
         if not vc:
             return
 
-        if "spotify.com/track" in query:
-            await self.add_from_spotify(ctx, query)
-        elif "spotify.com/playlist" in query:
-            await self.add_playlist_from_spotify(ctx, query)
+        q = query.strip()
+        if "spotify.com/track" in q:
+            await self.add_from_spotify(ctx, q)
+        elif "spotify.com/playlist" in q:
+            await self.add_playlist_from_spotify(ctx, q)
+        elif "spotify.com/album" in q:
+            await self.add_album_from_spotify(ctx, q)
+        elif "spotify.com/artist" in q:
+            await self.add_artist_from_spotify(ctx, q)
+        elif "list=" in q or "playlist" in q:
+            if "youtube.com" in q or "youtu.be" in q or "music.youtube.com" in q:
+                await self.add_playlist_from_youtube(ctx, q)
+            else:
+                await self.add_from_youtube(ctx, q, origin=f"🎵 Pedida por {ctx.author.name}")
         else:
-            await self.add_from_youtube(ctx, query, origin=f"🎵 Pedida por {ctx.author.name}")
+            await self.add_from_youtube(ctx, q, origin=f"🎵 Pedida por {ctx.author.name}")
 
     @commands.command(name="s", aliases=["skip"])
     async def skip(self, ctx):
@@ -836,19 +1014,41 @@ class MusicCore(commands.Cog):
 
     @commands.command(name="np", aliases=["nowplaying"])
     async def nowplaying(self, ctx):
-        """Muestra la canción reproduciéndose actualmente."""
+        """Muestra la canción reproduciéndose actualmente y su progreso de tiempo."""
         player = self.get_player(ctx)
         if not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
 
+        import time
+        start_time = getattr(player, 'current_song_start_time', None)
+        elapsed_sec = int(time.time() - start_time) if start_time else 0
+        duration_sec = player.current_song.get('duration', 0)
+        
+        elapsed_str = self.format_duration(elapsed_sec)
+        total_str = self.format_duration(duration_sec)
+
+        if duration_sec > 0:
+            percent = min(1.0, max(0.0, elapsed_sec / duration_sec))
+            bar_len = 12
+            filled = int(bar_len * percent)
+            progress_bar = f"`{'▬' * filled}🔘{'▬' * (bar_len - filled)}`"
+            time_display = f"`{elapsed_str} / {total_str}`\n{progress_bar}"
+        else:
+            time_display = f"`{elapsed_str}` 🔴 EN VIVO"
+
         embed = discord.Embed(
             title="🎧 Sonando Ahora",
-            description=f"**{player.current_song['title']}**",
+            description=f"**[{player.current_song.get('title', 'Desconocido')}]({player.current_song.get('url', 'https://www.youtube.com')})**",
             color=discord.Color.green()
         )
-        embed.add_field(name="Duración", value=self.format_duration(player.current_song.get('duration', 0)))
-        embed.add_field(name="Origen", value=player.current_song.get('origin', 'Desconocido'))
+        embed.add_field(name="👤 Artista", value=f"`{player.current_song.get('uploader', 'Artista')}`", inline=True)
+        embed.add_field(name="⏱️ Progreso", value=time_display, inline=True)
+        embed.add_field(name="🧬 Origen", value=f"`{player.current_song.get('origin', '🎵 Solicitada')}`", inline=False)
+        
+        if player.current_song.get('thumbnail') and player.current_song['thumbnail'].startswith("http"):
+            embed.set_thumbnail(url=player.current_song['thumbnail'])
+
         await ctx.send(embed=embed)
 
     @commands.command()
@@ -859,13 +1059,20 @@ class MusicCore(commands.Cog):
             player.voice_client.pause()
             await ctx.send("⏸️ Reproducción pausada.")
 
-    @commands.command()
+    @commands.command(name="resume", aliases=["r", "reanudar"])
     async def resume(self, ctx):
-        """Reanuda la reproducción pausada."""
+        """Reanuda la reproducción pausada o inicia la cola de canciones en espera."""
         player = self.get_player(ctx)
         if player.voice_client and player.voice_client.is_paused():
             player.voice_client.resume()
             await ctx.send("▶️ Reproducción reanudada.")
+        elif player.song_queue and (not player.voice_client or not player.voice_client.is_playing()):
+            vc = await self.connect_to_voice(ctx)
+            if vc and not player.current_song:
+                await ctx.send("▶️ Reanudando la reproducción de la cola de canciones...")
+                await self.play_next(ctx)
+        else:
+            await ctx.send("⚠️ No hay ninguna canción pausada ni canciones pendientes en cola.")
 
     @commands.command(name="stop", aliases=["disconnect", "leave", "exit", "dc"])
     async def stop(self, ctx):

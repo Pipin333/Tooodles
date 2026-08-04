@@ -89,32 +89,18 @@ def get_db_session():
         session.close()
 
 def setup_database():
-    """Crea todas las tablas si no existen y maneja migraciones de columnas."""
+    """Crea todas las tablas si no existen y maneja migraciones de columnas de forma segura."""
     from sqlalchemy import text
     Base.metadata.create_all(engine)
     
-    # Manejar migración de nuevas columnas para la tabla 'songs' de forma segura
-    with engine.connect() as conn:
-        # 1. spotify_id
-        try:
-            conn.execute(text("ALTER TABLE songs ADD COLUMN spotify_id VARCHAR"))
-            print("🗄️ Columna 'spotify_id' agregada exitosamente a 'songs'.")
-        except Exception:
-            pass  # La columna ya existe
-            
-        # 2. genres
-        try:
-            conn.execute(text("ALTER TABLE songs ADD COLUMN genres VARCHAR"))
-            print("🗄️ Columna 'genres' agregada exitosamente a 'songs'.")
-        except Exception:
-            pass  # La columna ya existe
-            
-        # 3. popularity
-        try:
-            conn.execute(text("ALTER TABLE songs ADD COLUMN popularity INTEGER"))
-            print("🗄️ Columna 'popularity' agregada exitosamente a 'songs'.")
-        except Exception:
-            pass  # La columna ya existe
+    # Manejar migración de nuevas columnas con transacciones explícitas
+    with engine.begin() as conn:
+        for col_name, col_type in [("spotify_id", "VARCHAR"), ("genres", "VARCHAR"), ("popularity", "INTEGER")]:
+            try:
+                conn.execute(text(f"ALTER TABLE songs ADD COLUMN {col_name} {col_type}"))
+                print(f"🗄️ Columna '{col_name}' agregada exitosamente a 'songs'.")
+            except Exception:
+                pass  # La columna ya existe
             
     print("🗄️ Tablas de base de datos creadas/verificadas correctamente.")
 
@@ -129,7 +115,8 @@ def add_or_update_song(title, url=None, artist=None, duration=0):
             title=title,
             url=url,
             artist=artist,
-            duration=duration
+            duration=duration,
+            played_count=0
         )
         session.add(new_song)
         session.flush()
@@ -157,7 +144,7 @@ def preload_top_songs_cache(limit=10):
     global cached_songs
     try:
         top_songs = get_top_songs(limit=limit)
-        cached_songs = {title: count for title, count in top_songs}
+        cached_songs = {title: count for title, count in top_songs if title}
         print("🎶 Top de canciones precargado en caché.")
     except Exception as e:
         print(f"⚠️ No se pudo precargar la caché de canciones: {e}")
@@ -168,20 +155,19 @@ def log_play_event(title, artist, duration, user_id, username, guild_id, listene
         # 1. Asegurar que la canción existe en la tabla de canciones
         existing_song = session.query(Song).filter_by(title=title).first()
         if not existing_song:
-            existing_song = Song(title=title, artist=artist, duration=duration)
+            existing_song = Song(title=title, artist=artist, duration=duration, played_count=1)
             session.add(existing_song)
             session.flush()
             session.refresh(existing_song)
+        else:
+            existing_song.played_count = (existing_song.played_count or 0) + 1
         
-        # 2. Incrementar contador de reproducciones
-        existing_song.played_count += 1
-        
-        # 3. Guardar log de telemetría
+        # 2. Guardar log de telemetría con casteo de tipos consistente
         log_entry = PlayLog(
-            user_id=user_id,
+            user_id=str(user_id) if user_id is not None else None,
             username=username,
             song_id=existing_song.id,
-            guild_id=guild_id,
+            guild_id=str(guild_id) if guild_id is not None else None,
             listened_duration=listened_duration,
             completed=1 if completed else 0,
             skipped_at=skipped_at

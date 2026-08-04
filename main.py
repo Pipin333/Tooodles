@@ -37,6 +37,44 @@ async def on_message(message):
         return
     await bot.process_commands(message)
 
+import signal
+
+async def graceful_shutdown(bot):
+    if getattr(bot, 'is_draining', False):
+        return
+    bot.is_draining = True
+    print("🛑 Señal de apagado/reinicio recibida (SIGTERM/SIGINT). Iniciando vaciado suave (Graceful Drain)...", flush=True)
+
+    # Guardar canciones pendientes antes de reiniciar según la preferencia del servidor
+    core = bot.get_cog("MusicCore")
+    if core:
+        from sznUtils import save_guild_queue, is_guild_persist_enabled
+        for player in list(core.players.values()):
+            player.radio_mode = False
+            if is_guild_persist_enabled(player.guild_id) and player.song_queue:
+                save_guild_queue(player.guild_id, player.song_queue)
+            player.song_queue.clear()
+
+    max_wait_seconds = 600  # Límite máximo de seguridad
+    waited = 0
+
+    while waited < max_wait_seconds:
+        active_voice = [vc for vc in bot.voice_clients if vc.is_connected() and (vc.is_playing() or vc.is_paused())]
+        if not active_voice:
+            print("✅ Canción finalizada y canal liberado. Procediendo con el apagado inmediato...", flush=True)
+            break
+        await asyncio.sleep(2)
+        waited += 2
+
+    for vc in list(bot.voice_clients):
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            pass
+
+    print("👋 Cerrando conexión del bot con Discord...", flush=True)
+    await bot.close()
+
 async def main():
     print("🚀 Inicializando Tooodles Bot...")
     setup_database()
@@ -74,6 +112,13 @@ async def main():
     except Exception as e:
         print(f"❌ Error al cargar cogs: {e.__class__.__name__}: {e}")
         traceback.print_exc()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(graceful_shutdown(bot)))
+        except (NotImplementedError, AttributeError):
+            pass
 
     token = os.getenv("token_priv")
     if token:

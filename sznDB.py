@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands
 from rapidfuzz import process
@@ -34,7 +35,7 @@ class MusicDB(commands.Cog):
         try:
             with get_db_session() as session:
                 songs = session.query(Song).all()
-                choices = {song.title: song for song in songs}
+                choices = {song.title: song for song in songs if song.title}
                 if not choices:
                     return None
                 match = process.extractOne(query, choices.keys())
@@ -47,7 +48,7 @@ class MusicDB(commands.Cog):
     def get_liked_songs_by_user(self, user_id):
         try:
             with get_db_session() as session:
-                likes = session.query(UserLike).filter_by(user_id=user_id).all()
+                likes = session.query(UserLike).filter_by(user_id=str(user_id)).all()
                 if not likes:
                     return []
                 song_ids = [like.song_id for like in likes]
@@ -58,8 +59,9 @@ class MusicDB(commands.Cog):
 
     def get_liked_songs_by_users(self, user_ids):
         try:
+            str_user_ids = [str(uid) for uid in user_ids]
             with get_db_session() as session:
-                likes = session.query(UserLike).filter(UserLike.user_id.in_(user_ids)).all()
+                likes = session.query(UserLike).filter(UserLike.user_id.in_(str_user_ids)).all()
                 if not likes:
                     return []
                 song_ids = {like.song_id for like in likes}
@@ -74,9 +76,9 @@ class MusicDB(commands.Cog):
                 song = session.query(Song).filter_by(title=song_title).first()
                 if not song:
                     return False
-                existing = session.query(UserLike).filter_by(user_id=user_id, song_id=song.id).first()
+                existing = session.query(UserLike).filter_by(user_id=str(user_id), song_id=song.id).first()
                 if not existing:
-                    like = UserLike(user_id=user_id, song_id=song.id)
+                    like = UserLike(user_id=str(user_id), song_id=song.id)
                     session.add(like)
                     return True
                 return False
@@ -90,7 +92,7 @@ class MusicDB(commands.Cog):
                 song = session.query(Song).filter_by(title=song_title).first()
                 if not song:
                     return False
-                existing = session.query(UserLike).filter_by(user_id=user_id, song_id=song.id).first()
+                existing = session.query(UserLike).filter_by(user_id=str(user_id), song_id=song.id).first()
                 if existing:
                     session.delete(existing)
                     return True
@@ -106,7 +108,7 @@ class MusicDB(commands.Cog):
         if not core or not core.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
-        added = self.like_song(str(ctx.author.id), core.current_song['title'])
+        added = await asyncio.to_thread(self.like_song, str(ctx.author.id), core.current_song['title'])
         if added:
             await ctx.send(f"❤️ Canción guardada en tus favoritas: **{core.current_song['title']}**")
         else:
@@ -119,7 +121,7 @@ class MusicDB(commands.Cog):
         if not core or not core.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
-        removed = self.unlike_song(str(ctx.author.id), core.current_song['title'])
+        removed = await asyncio.to_thread(self.unlike_song, str(ctx.author.id), core.current_song['title'])
         if removed:
             await ctx.send(f"❌ Canción eliminada de tus favoritas: **{core.current_song['title']}**")
         else:
@@ -128,7 +130,7 @@ class MusicDB(commands.Cog):
     @commands.command()
     async def liked(self, ctx):
         """Muestra tus canciones favoritas."""
-        songs = self.get_liked_songs_by_user(str(ctx.author.id))
+        songs = await asyncio.to_thread(self.get_liked_songs_by_user, str(ctx.author.id))
         if not songs:
             await ctx.send("📭 No tienes canciones favoritas aún.")
             return

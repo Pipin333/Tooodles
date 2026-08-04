@@ -42,6 +42,51 @@ def load_config(key: str) -> str | None:
         print(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
     return None
 
+def save_guild_queue(guild_id: int, song_queue: list):
+    """Guarda la cola de canciones de un servidor en la BD para persistencia entre reinicios."""
+    try:
+        serializable = []
+        for song in song_queue:
+            if isinstance(song, dict) and song.get('title'):
+                serializable.append({
+                    'title': song.get('title'),
+                    'url': song.get('url'),
+                    'duration': song.get('duration', 0),
+                    'uploader': song.get('uploader', ''),
+                    'origin': song.get('origin', '🎵 Recuperada tras reinicio'),
+                    'user_id': song.get('user_id'),
+                    'username': song.get('username'),
+                    'guild_id': str(guild_id),
+                    'id': song.get('id')
+                })
+        save_config(f"queue_{guild_id}", json.dumps(serializable))
+    except Exception as e:
+        print(f"⚠️ Error al guardar cola persistente para servidor {guild_id}: {e}", flush=True)
+
+def load_guild_queue(guild_id: int) -> list:
+    """Carga y limpia la cola de canciones guardada de un servidor desde la BD."""
+    try:
+        raw = load_config(f"queue_{guild_id}")
+        if raw:
+            data = json.loads(raw)
+            if isinstance(data, list) and data:
+                save_config(f"queue_{guild_id}", json.dumps([]))
+                return data
+    except Exception as e:
+        print(f"⚠️ Error al cargar cola persistente para servidor {guild_id}: {e}", flush=True)
+    return []
+
+def is_guild_persist_enabled(guild_id: int) -> bool:
+    """Verifica si la persistencia de colas está habilitada para un servidor específico."""
+    val = load_config(f"persist_queue_{guild_id}")
+    if val is not None:
+        return val.lower() in ("on", "true", "1", "yes")
+    return os.getenv("PERSIST_QUEUES", "true").lower() in ("true", "1", "yes")
+
+def set_guild_persist_enabled(guild_id: int, enabled: bool):
+    """Guarda la preferencia de persistencia de colas por servidor."""
+    save_config(f"persist_queue_{guild_id}", "on" if enabled else "off")
+
 def json_to_netscape(cookies_json: list | str) -> str:
     """Convierte una lista o string JSON de cookies a formato Netscape."""
     try:
@@ -159,8 +204,53 @@ def get_cookie_file_path() -> str | None:
 
     return None
 
+def extract_playlist_metadata(url: str) -> list[dict]:
+    """Extrae metadatos planos de playlists de YouTube o YouTube Music."""
+    try:
+        from yt_dlp import YoutubeDL
+        cookie_path = get_cookie_file_path()
+        ydl_opts = {
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+            "quiet": True,
+            "nocheckcertificate": True,
+            "cookiefile": cookie_path if cookie_path else None
+        }
+        clean_url = url.strip()
+        if "music.youtube.com" in clean_url:
+            clean_url = clean_url.replace("music.youtube.com", "www.youtube.com")
+
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(clean_url, download=False)
+            if not info:
+                return []
+            entries = info.get('entries') or []
+            result = []
+            for entry in entries:
+                if not entry or not isinstance(entry, dict):
+                    continue
+                v_id = entry.get('id')
+                v_url = entry.get('url') or (f"https://www.youtube.com/watch?v={v_id}" if v_id else None)
+                v_title = entry.get('title')
+                v_uploader = entry.get('uploader') or entry.get('artist') or 'YouTube'
+                v_duration = entry.get('duration', 0)
+                if v_title and v_title not in ('[Private video]', '[Deleted video]'):
+                    result.append({
+                        'title': v_title,
+                        'url': v_url,
+                        'duration': v_duration or 0,
+                        'uploader': v_uploader,
+                        'id': v_id
+                    })
+            return result
+    except Exception as e:
+        print(f"⚠️ Error al extraer playlist de YouTube: {e}", flush=True)
+    return []
+
 def extract_flat_metadata(query: str) -> dict | None:
     """Utiliza yt-dlp únicamente con extract_flat=True para extraer metadatos sin descargar audio."""
+    if "spotify.com" in query:
+        return None
     try:
         from yt_dlp import YoutubeDL
         search_target = query if query.startswith("http") else f"ytsearch:{query}"
@@ -195,10 +285,13 @@ async def extract_info(query: str) -> dict:
         raise ValueError("Consulta vacía.")
 
     q = query.strip()
+    if "spotify.com" in q:
+        raise ValueError("Los enlaces de Spotify no pueden ser procesados directamente con yt-dlp por protección DRM. Usa los comandos/métodos de Spotify.")
+
     clean_query = q
 
-    if "spotify.com/track" in q or "soundcloud.com" in q:
-        flat_meta = extract_flat_metadata(q)
+    if "soundcloud.com" in q:
+        flat_meta = await asyncio.to_thread(extract_flat_metadata, q)
         if flat_meta and flat_meta.get('title'):
             clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}".strip()
 
@@ -216,8 +309,11 @@ async def extract_info(query: str) -> dict:
             "nocheckcertificate": True,
             "cookiefile": cookie_path if cookie_path else None,
             "js_runtimes": {"node": {"path": node_path}},
-            "remote_components": ["ejs:github"],
-            "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["ios", "android", "mweb"]
+                }
+            }
         }
         def _yt_extract():
             with YoutubeDL(ydl_opts) as ydl:

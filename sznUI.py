@@ -31,6 +31,56 @@ class PrefixModal(Modal, title="Configurar Prefijo del Bot"):
         await interaction.followup.send(f"✅ El prefijo del bot ha sido cambiado a `{new_prefix}` para este servidor.", ephemeral=True)
 
 
+class PersistApprovalView(View):
+    def __init__(self, bot, guild, requester_ctx):
+        super().__init__(timeout=86400)
+        self.bot = bot
+        self.guild = guild
+        self.requester_ctx = requester_ctx
+
+    @discord.ui.button(label="✅ Autorizar", style=discord.ButtonStyle.success, custom_id="approve_persist")
+    async def approve(self, interaction: discord.Interaction, button: Button):
+        from sznUtils import set_guild_persist_enabled
+        set_guild_persist_enabled(self.guild.id, True)
+
+        for item in self.children:
+            item.disabled = True
+
+        embed = interaction.message.embeds[0]
+        embed.title = "✅ Solicitud de Persistencia AUTORIZADA"
+        embed.color = discord.Color.green()
+        embed.set_footer(text=f"Aprobada por @{interaction.user.name}")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        try:
+            await self.requester_ctx.send(
+                f"🎉 ¡El dueño del bot ha **autorizado** la persistencia de colas para el servidor **{self.guild.name}**!"
+            )
+        except Exception:
+            pass
+
+    @discord.ui.button(label="❌ Rechazar", style=discord.ButtonStyle.danger, custom_id="deny_persist")
+    async def deny(self, interaction: discord.Interaction, button: Button):
+        from sznUtils import set_guild_persist_enabled
+        set_guild_persist_enabled(self.guild.id, False)
+
+        for item in self.children:
+            item.disabled = True
+
+        embed = interaction.message.embeds[0]
+        embed.title = "❌ Solicitud de Persistencia RECHAZADA"
+        embed.color = discord.Color.red()
+        embed.set_footer(text=f"Rechazada por @{interaction.user.name}")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        try:
+            await self.requester_ctx.send(
+                f"❌ La solicitud de persistencia de colas para el servidor **{self.guild.name}** fue rechazada por el dueño del bot."
+            )
+        except Exception:
+            pass
+
+
 class MusicUI(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -40,18 +90,19 @@ class MusicUI(commands.Cog):
         self.bot.remove_check(self.check_command_channel)
 
     async def check_command_channel(self, ctx):
-        if not ctx.guild:
+        if not ctx.guild or not ctx.command:
             return True
 
+        import asyncio
         from sznUtils import load_config
-        channel_id_str = load_config(f"cmd_channel_{ctx.guild.id}")
+        channel_id_str = await asyncio.to_thread(load_config, f"cmd_channel_{ctx.guild.id}")
         if not channel_id_str:
             return True
 
         if str(ctx.channel.id) == channel_id_str:
             return True
 
-        if ctx.command.name in ("channel", "canal", "settings"):
+        if ctx.command and ctx.command.name in ("channel", "canal", "settings", "persist", "persistencia", "join", "connect", "conectar", "unir", "j"):
             return True
 
         try:
@@ -76,9 +127,22 @@ class MusicUI(commands.Cog):
         duration = song_dict.get('duration', 0)
         uploader = song_dict.get('uploader', 'Artista Desconocido')
         thumbnail = song_dict.get('thumbnail', '')
-        username = song_dict.get('username')
+        import time
+        start_time = getattr(player, 'current_song_start_time', None)
+        elapsed_sec = int(time.time() - start_time) if start_time else 0
+        duration_sec = duration
 
-        duration_str = core.format_duration(duration)
+        elapsed_str = core.format_duration(elapsed_sec)
+        total_str = core.format_duration(duration_sec)
+
+        if duration_sec > 0:
+            percent = min(1.0, max(0.0, elapsed_sec / duration_sec))
+            bar_len = 10
+            filled = int(bar_len * percent)
+            progress_bar = f"`{'▬' * filled}🔘{'▬' * (bar_len - filled)}`"
+            time_display = f"`{elapsed_str} / {total_str}`\n{progress_bar}"
+        else:
+            time_display = f"`{elapsed_str}` 🔴 EN VIVO"
 
         is_radio = "radio" in origin.lower()
         embed_color = 0x1db954 if "spotify" in origin.lower() else (0x8a2be2 if is_radio else 0x7d5fff)
@@ -90,7 +154,7 @@ class MusicUI(commands.Cog):
         )
 
         embed.add_field(name="👤 Artista", value=f"`{uploader}`", inline=True)
-        embed.add_field(name="⏱️ Duración", value=f"`{duration_str}`", inline=True)
+        embed.add_field(name="⏱️ Progreso", value=time_display, inline=True)
         
         if username:
             embed.add_field(name="📥 Pedido por", value=f"@{username}", inline=True)
@@ -133,6 +197,60 @@ class MusicUI(commands.Cog):
             return
 
         await self.notify_now_playing(ctx, player.current_song)
+
+    @commands.command(name="persist", aliases=["persistencia"])
+    async def toggle_persist_queue(self, ctx, estado: str = None):
+        """Habilita o deshabilita la persistencia de colas para este servidor (Solicitud al Dueño)."""
+        if not ctx.guild:
+            await ctx.send("⚠️ Este comando solo se puede usar en un servidor.")
+            return
+
+        is_admin = ctx.author.guild_permissions.administrator
+        is_owner = await self.bot.is_owner(ctx.author)
+
+        if not (is_admin or is_owner):
+            await ctx.send("❌ Solo los administradores del servidor o el dueño del bot pueden cambiar esta configuración.")
+            return
+
+        from sznUtils import is_guild_persist_enabled, set_guild_persist_enabled
+
+        if not estado:
+            current = is_guild_persist_enabled(ctx.guild.id)
+            status_str = "🟢 Activada" if current else "🔴 Desactivada"
+            await ctx.send(f"ℹ️ La persistencia de colas en este servidor está: **{status_str}**.\nUsa `{ctx.prefix}persist on` o `{ctx.prefix}persist off` para cambiarla.")
+            return
+
+        mode = estado.lower().strip()
+        if mode in ("on", "activar", "activado", "true", "1"):
+            if is_owner:
+                set_guild_persist_enabled(ctx.guild.id, True)
+                await ctx.send("✅ Persistencia de colas **activada** directamente por el dueño del bot.")
+            else:
+                try:
+                    app_info = await self.bot.application_info()
+                    owner = app_info.owner
+
+                    embed = discord.Embed(
+                        title="📩 Solicitud de Persistencia de Colas",
+                        description=f"El administrador **@{ctx.author.name}** solicita activar la persistencia de colas.",
+                        color=discord.Color.gold()
+                    )
+                    embed.add_field(name="🏰 Servidor", value=f"`{ctx.guild.name}` (`{ctx.guild.id}`)", inline=True)
+                    embed.add_field(name="👤 Solicitante", value=f"@{ctx.author.name} (`{ctx.author.id}`)", inline=True)
+                    embed.set_footer(text="Usa los botones para responder a esta solicitud.")
+
+                    view = PersistApprovalView(self.bot, ctx.guild, ctx)
+                    await owner.send(embed=embed, view=view)
+                    await ctx.send("📩 **Solicitud enviada**: Se envió un mensaje al dueño del bot para solicitar autorización. Te notificaremos cuando responda.")
+                except Exception as e:
+                    print(f"⚠️ Error al enviar solicitud por DM al dueño: {e}", flush=True)
+                    await ctx.send("⚠️ No se pudo enviar el mensaje privado al dueño del bot. Por favor intenta más tarde.")
+
+        elif mode in ("off", "desactivar", "desactivado", "false", "0"):
+            set_guild_persist_enabled(ctx.guild.id, False)
+            await ctx.send("❌ Persistencia de colas **desactivada** para este servidor.")
+        else:
+            await ctx.send("⚠️ Opción no válida. Usa `on` o `off`.")
 
     class MusicControls(View):
         def __init__(self, core, ctx):
