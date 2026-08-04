@@ -1163,7 +1163,7 @@ class MusicCore(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
 
-    @tasks.loop(seconds=120)
+    @tasks.loop(seconds=30)
     async def inactivity_check(self):
         for guild_id, player in list(self.players.items()):
             if getattr(player, 'is_loading_song', False):
@@ -1178,16 +1178,16 @@ class MusicCore(commands.Cog):
                 print(f"✅ Desconectado por inactividad en guild {guild_id}.", flush=True)
                 if player.last_ctx:
                     try:
-                        await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 2 minutos).")
+                        await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 30 segundos).")
                     except Exception:
                         pass
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
+        # 1. El bot fue desconectado directamente
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
                 if getattr(self.bot, 'is_draining', False):
-                    # En modo de apagado suave (Graceful Drain), graceful_shutdown ya guardó la cola. No sobreescribir.
                     return
 
                 player = self.get_player(member.guild)
@@ -1211,6 +1211,45 @@ class MusicCore(commands.Cog):
                         await player.last_ctx.send("🔌 Me he desconectado del canal de voz (desconexión manual o externa).")
                     except Exception:
                         pass
+
+        # 2. Un usuario humano salió de un canal de voz
+        elif before.channel and (not after.channel or after.channel.id != before.channel.id):
+            player = self.get_player(member.guild)
+            vc = player.voice_client
+            if vc and vc.channel and vc.channel.id == before.channel.id:
+                non_bots = [m for m in vc.channel.members if not m.bot]
+                if len(non_bots) == 0:
+                    async def _disconnect_if_still_alone():
+                        await asyncio.sleep(30)
+                        if player.voice_client and player.voice_client.channel and len([m for m in player.voice_client.channel.members if not m.bot]) == 0:
+                            from sznUtils import save_guild_queue, is_guild_persist_enabled
+                            if is_guild_persist_enabled(member.guild.id):
+                                full_queue = []
+                                if player.current_song:
+                                    full_queue.append(player.current_song)
+                                full_queue.extend(player.song_queue)
+                                if full_queue:
+                                    save_guild_queue(member.guild.id, full_queue)
+
+                            player.song_queue.clear()
+                            player.radio_mode = False
+                            player.current_song = None
+                            cleanup_cache()
+                            try:
+                                if player.voice_client:
+                                    player.voice_client.stop()
+                                    await player.voice_client.disconnect()
+                            except Exception:
+                                pass
+                            player.voice_client = None
+                            
+                            if player.last_ctx:
+                                try:
+                                    await player.last_ctx.send("👤 Me he desconectado automáticamente al quedarme solo en el canal. (La cola fue guardada en BD).")
+                                except Exception:
+                                    pass
+
+                    self.bot.loop.create_task(_disconnect_if_still_alone())
 
     @commands.command()
     async def radio(self, ctx, *, arg: str = "on"):
