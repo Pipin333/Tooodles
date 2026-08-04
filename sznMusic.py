@@ -237,14 +237,19 @@ class MusicCore(commands.Cog):
             player.radio_mode = (default_radio == "on")
             
             # Restaurar cola persistente si está activada para este servidor
-            if is_guild_persist_enabled(ctx.guild.id) and not player.song_queue:
+            persist_enabled = is_guild_persist_enabled(ctx.guild.id)
+            print(f"🔍 [JOIN] Guild {ctx.guild.id} — persist={persist_enabled}, song_queue_actual={len(player.song_queue)}", flush=True)
+            if persist_enabled and not player.song_queue:
                 restored = await asyncio.to_thread(load_guild_queue, ctx.guild.id)
+                print(f"🔍 [JOIN] load_guild_queue devolvió {len(restored)} canciones para guild {ctx.guild.id}", flush=True)
                 if restored:
                     player.song_queue.extend(restored)
                     await ctx.send(f"📥 **Cola recuperada**: Se restauraron **{len(restored)}** canciones pendientes tras el reinicio.")
                     self.schedule_queue_optimizations(ctx)
                     if not player.current_song and not (player.voice_client and player.voice_client.is_playing()):
                         self.bot.loop.create_task(self.play_next(ctx))
+                else:
+                    print(f"⚠️ [JOIN] No había cola guardada en BD para guild {ctx.guild.id}", flush=True)
 
             return player.voice_client
         except Exception as e:

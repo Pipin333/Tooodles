@@ -51,8 +51,15 @@ async def graceful_shutdown(bot):
         from sznUtils import save_guild_queue, is_guild_persist_enabled
         for player in list(core.players.values()):
             player.radio_mode = False
-            if is_guild_persist_enabled(player.guild_id) and player.song_queue:
-                save_guild_queue(player.guild_id, player.song_queue)
+            persist_enabled = is_guild_persist_enabled(player.guild_id)
+            print(f"🔍 [DRAIN] Guild {player.guild_id} — persist={persist_enabled}, song_queue={len(player.song_queue)} canciones, current_song={'SI' if player.current_song else 'NO'}", flush=True)
+            if persist_enabled:
+                full_queue = list(player.song_queue)  # solo pendientes, current_song ya sonará hasta el final
+                if full_queue:
+                    save_guild_queue(player.guild_id, full_queue)
+                    print(f"💾 [DRAIN] Cola guardada para guild {player.guild_id}: {len(full_queue)} canciones pendientes.", flush=True)
+                else:
+                    print(f"⚠️ [DRAIN] Cola vacía para guild {player.guild_id}, nada que guardar.", flush=True)
             player.song_queue.clear()
 
     max_wait_seconds = 600  # Límite máximo de seguridad
