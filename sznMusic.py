@@ -1076,8 +1076,17 @@ class MusicCore(commands.Cog):
 
     @commands.command(name="stop", aliases=["disconnect", "leave", "exit", "dc"])
     async def stop(self, ctx):
-        """Detiene la música, desconecta del canal y limpia la cola."""
+        """Detiene la música, desconecta del canal y guarda la cola si la persistencia está activa."""
         player = self.get_player(ctx)
+        from sznUtils import save_guild_queue, is_guild_persist_enabled
+        if is_guild_persist_enabled(ctx.guild.id):
+            full_queue = []
+            if player.current_song:
+                full_queue.append(player.current_song)
+            full_queue.extend(player.song_queue)
+            if full_queue:
+                save_guild_queue(ctx.guild.id, full_queue)
+
         player.song_queue.clear()
         player.radio_mode = False
         cleanup_cache()
@@ -1086,11 +1095,11 @@ class MusicCore(commands.Cog):
             await player.voice_client.disconnect()
             player.voice_client = None
         player.current_song = None
-        await ctx.send("🛑 Reproducción detenida, bot desconectado y cola limpiada.")
+        await ctx.send("🛑 Reproducción detenida y bot desconectado (la cola fue guardada en BD si la persistencia está activa).")
 
     @commands.command(name="clear", aliases=["clean", "cq"])
     async def clear(self, ctx):
-        """Limpia la cola de canciones sin detener la reproducción actual."""
+        """Limpia la cola de canciones y la base de datos sin detener la canción actual."""
         player = self.get_player(ctx)
         if not player.song_queue:
             await ctx.send("⚠️ La cola ya está vacía.")
@@ -1099,9 +1108,11 @@ class MusicCore(commands.Cog):
         for song in player.song_queue:
             cleanup_cache(song)
 
+        from sznUtils import save_guild_queue
+        save_guild_queue(ctx.guild.id, [])
         player.song_queue.clear()
         self.schedule_queue_optimizations(ctx)
-        await ctx.send("🧹 Cola de canciones vaciada (la canción actual continuará sonando).")
+        await ctx.send("🧹 Cola de canciones vaciada completamente (canción actual continúa).")
 
     @commands.command()
     async def shuffle(self, ctx):
@@ -1171,7 +1182,15 @@ class MusicCore(commands.Cog):
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
                 player = self.get_player(member.guild)
-                print(f"🔌 Desconexión de canal de voz detectada vía evento en {member.guild.name}.", flush=True)
+                from sznUtils import save_guild_queue, is_guild_persist_enabled
+                if is_guild_persist_enabled(member.guild.id):
+                    full_queue = []
+                    if player.current_song:
+                        full_queue.append(player.current_song)
+                    full_queue.extend(player.song_queue)
+                    if full_queue:
+                        save_guild_queue(member.guild.id, full_queue)
+
                 player.song_queue.clear()
                 player.radio_mode = False
                 cleanup_cache()
