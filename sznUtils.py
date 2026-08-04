@@ -311,7 +311,7 @@ async def extract_info(query: str) -> dict:
             "js_runtimes": {"node": {"path": node_path}},
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"]
+                    "player_client": ["mweb", "web"]
                 }
             }
         }

@@ -127,6 +127,7 @@ class MusicUI(commands.Cog):
         duration = song_dict.get('duration', 0)
         uploader = song_dict.get('uploader', 'Artista Desconocido')
         thumbnail = song_dict.get('thumbnail', '')
+        username = song_dict.get('username')
         import time
         start_time = getattr(player, 'current_song_start_time', None)
         elapsed_sec = int(time.time() - start_time) if start_time else 0
