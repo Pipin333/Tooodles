@@ -164,6 +164,7 @@ class GuildPlayer:
         self.current_song_start_time = 0
         self.current_song_skipped = False
         self.radio_history = []
+        self.play_lock = asyncio.Lock()
 
 
 class MusicCore(commands.Cog):
@@ -542,75 +543,78 @@ class MusicCore(commands.Cog):
         player = self.get_player(ctx)
         player.last_ctx = ctx
 
-        if player.voice_client and (player.voice_client.is_playing() or player.voice_client.is_paused()):
-            return
+        async with player.play_lock:
+            if player.voice_client and (player.voice_client.is_playing() or player.voice_client.is_paused()):
+                return
 
-        if getattr(player, 'radio_mode', False) and len(player.song_queue) < 2:
-            await self.expand_radio_queue(ctx)
+            if getattr(player, 'radio_mode', False) and len(player.song_queue) < 2:
+                await self.expand_radio_queue(ctx)
 
-        if not player.song_queue:
-            await ctx.send("📭 La cola de canciones está vacía.")
-            player.current_song = None
-            return
-
-        next_item = player.song_queue.pop(0)
-        if not next_item or not isinstance(next_item, dict):
-            player.current_song = None
-            return await self.play_next(ctx)
-
-        player.current_song = next_item
-        self.record_played_track(player.current_song.get('title', ''), ctx)
-
-        ui = self.bot.get_cog("MusicUI")
-        if ui and player.current_song:
-            await ui.notify_now_playing(ctx, player.current_song)
-
-        musicdb = getattr(self.bot, "musicdb", None)
-        if musicdb and player.current_song.get('title'):
-            musicdb.log_song(player.current_song['title'])
-
-        self.schedule_queue_optimizations(ctx)
-
-        if not player.current_song.get('url') and not player.current_song.get('cache_path'):
-            try:
-                resolved = await extract_info(player.current_song.get('title', ''))
-                if resolved:
-                    player.current_song.update(resolved)
-                else:
-                    raise RuntimeError("Failed to resolve stream url.")
-            except Exception as e:
-                print(f"⚠️ Error al resolver tema de cola: {e}", flush=True)
+            if not player.song_queue:
+                await ctx.send("📭 La cola de canciones está vacía.")
                 player.current_song = None
-                return await self.play_next(ctx)
+                return
 
-        target_path = player.current_song.get('cache_path')
-        if not target_path or not os.path.exists(target_path):
-            target_path = player.current_song.get('url')
+            next_item = player.song_queue.pop(0)
+            if not next_item or not isinstance(next_item, dict):
+                player.current_song = None
+                return
 
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}"'
-        if target_path and target_path.startswith("http"):
-            before_opts += ' -headers "Referer: https://www.youtube.com/\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
-        ffmpeg_options = '-vn -threads 2'
+            player.current_song = next_item
+            self.record_played_track(player.current_song.get('title', ''), ctx)
 
-        def after_playing(error):
-            if error:
-                print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+            ui = self.bot.get_cog("MusicUI")
+            if ui and player.current_song:
+                await ui.notify_now_playing(ctx, player.current_song)
 
-            asyncio.run_coroutine_threadsafe(self._process_after_playing(ctx, player.current_song, getattr(player, 'current_song_start_time', None), getattr(player, 'current_song_skipped', False)), self.bot.loop)
+            musicdb = getattr(self.bot, "musicdb", None)
+            if musicdb and player.current_song.get('title'):
+                musicdb.log_song(player.current_song['title'])
 
-        try:
-            player.current_song_start_time = time.time()
-            player.current_song_skipped = False
-            audio_source = discord.FFmpegPCMAudio(target_path, before_options=before_opts, options=ffmpeg_options)
-            if player.voice_client and player.voice_client.is_connected():
-                player.voice_client.play(audio_source, after=after_playing)
-            else:
-                await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
-        except Exception as e:
-            print(f"❌ Error al iniciar FFmpeg: {e}", flush=True)
-            player.current_song = None
-            await self.play_next(ctx)
+            self.schedule_queue_optimizations(ctx)
+
+            if not player.current_song.get('url') and not player.current_song.get('cache_path'):
+                try:
+                    resolved = await extract_info(player.current_song.get('title', ''))
+                    if resolved:
+                        player.current_song.update(resolved)
+                    else:
+                        raise RuntimeError("Failed to resolve stream url.")
+                except Exception as e:
+                    print(f"⚠️ Error al resolver tema de cola: {e}", flush=True)
+                    player.current_song = None
+                    return
+
+            target_path = player.current_song.get('cache_path')
+            if not target_path or not os.path.exists(target_path):
+                target_path = player.current_song.get('url')
+
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}"'
+            if target_path and target_path.startswith("http"):
+                before_opts += ' -headers "Referer: https://www.youtube.com/\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
+            ffmpeg_options = '-vn -threads 2'
+
+            def after_playing(error):
+                if error:
+                    print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+
+                asyncio.run_coroutine_threadsafe(self._process_after_playing(ctx, player.current_song, getattr(player, 'current_song_start_time', None), getattr(player, 'current_song_skipped', False)), self.bot.loop)
+
+            try:
+                player.current_song_start_time = time.time()
+                player.current_song_skipped = False
+                audio_source = discord.FFmpegPCMAudio(target_path, before_options=before_opts, options=ffmpeg_options)
+                if player.voice_client and player.voice_client.is_connected():
+                    if player.voice_client.is_playing():
+                        print("⚠️ Voice client ya estaba reproduciendo audio. Cancelando reproducción duplicada.", flush=True)
+                        return
+                    player.voice_client.play(audio_source, after=after_playing)
+                else:
+                    await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
+            except Exception as e:
+                print(f"❌ Error al iniciar FFmpeg: {e}", flush=True)
+                player.current_song = None
 
     async def _process_after_playing(self, ctx, current_song, start_time, skipped):
         player = self.get_player(ctx)
