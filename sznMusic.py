@@ -631,19 +631,6 @@ class MusicCore(commands.Cog):
         player.current_song = None
         await self.play_next(ctx)
 
-        try:
-            player.current_song_start_time = time.time()
-            player.current_song_skipped = False
-            audio_source = discord.FFmpegPCMAudio(target_path, before_options=before_opts, options=ffmpeg_options)
-            if player.voice_client and player.voice_client.is_connected():
-                player.voice_client.play(audio_source, after=after_playing)
-            else:
-                await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
-        except Exception as e:
-            print(f"❌ Error al iniciar FFmpeg: {e}", flush=True)
-            player.current_song = None
-            await self.play_next(ctx)
-
     def _clean_title_for_search(self, title: str) -> tuple[str, str | None]:
         import re
         clean = title

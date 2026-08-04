@@ -28,6 +28,10 @@ class MusicDB(commands.Cog):
                 song = session.query(Song).filter_by(title=title).first()
                 if song:
                     song.played_count = (song.played_count or 0) + 1
+                else:
+                    # Crear la canción si no existe para que td?top la cuente
+                    new_song = Song(title=title, played_count=1)
+                    session.add(new_song)
         except Exception as e:
             print(f"⚠️ Error al registrar reproducción de canción: {e}")
 
