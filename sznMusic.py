@@ -1181,6 +1181,10 @@ class MusicCore(commands.Cog):
     async def on_voice_state_update(self, member, before, after):
         if member.id == self.bot.user.id:
             if before.channel and not after.channel:
+                if getattr(self.bot, 'is_draining', False):
+                    # En modo de apagado suave (Graceful Drain), graceful_shutdown ya guardó la cola. No sobreescribir.
+                    return
+
                 player = self.get_player(member.guild)
                 from sznUtils import save_guild_queue, is_guild_persist_enabled
                 if is_guild_persist_enabled(member.guild.id):
