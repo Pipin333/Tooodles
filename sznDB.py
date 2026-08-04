@@ -4,19 +4,21 @@ from discord.ext import commands
 from rapidfuzz import process
 from database import (
     get_top_songs,
+    get_recent_history,
     add_or_update_song,
     preload_top_songs_cache,
     get_db_session,
     Song,
     UserLike,
-    AppConfig
+    AppConfig,
+    PlayLog
 )
 
 class MusicDB(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         preload_top_songs_cache()
-        self.last_played = []  # historial reciente en memoria
+        self.last_played = []  # historial reciente en memoria (fallback)
 
     def log_song(self, title):
         self.last_played.insert(0, title)
@@ -29,7 +31,6 @@ class MusicDB(commands.Cog):
                 if song:
                     song.played_count = (song.played_count or 0) + 1
                 else:
-                    # Crear la canción si no existe para que td?top la cuente
                     new_song = Song(title=title, played_count=1)
                     session.add(new_song)
         except Exception as e:
@@ -163,8 +164,9 @@ class MusicDB(commands.Cog):
         liked_songs = self.get_liked_songs_by_users(user_ids)
 
         if not liked_songs:
-            await ctx.send("📭 Ningún participante en la llamada tiene canciones favoritas. Generando radio basada en el Top Global...")
-            top_songs = get_top_songs(10)
+            await ctx.send("📭 Ningún participante en la llamada tiene canciones favoritas. Generando radio basada en el Top del servidor...")
+            guild_id = ctx.guild.id if ctx.guild else None
+            top_songs = await asyncio.to_thread(get_top_songs, guild_id=guild_id, limit=10)
             if not top_songs or not core.sp:
                 await ctx.send("⚠️ No se pudo generar recomendaciones.")
                 return
@@ -179,7 +181,7 @@ class MusicDB(commands.Cog):
                         await core.play_next(ctx)
                     break
             else:
-                await ctx.send("⚠️ No se pudo generar recomendaciones basadas en el top global.")
+                await ctx.send("⚠️ No se pudo generar recomendaciones basadas en el top del servidor.")
             return
 
         if not core.sp:
@@ -202,27 +204,35 @@ class MusicDB(commands.Cog):
 
     @commands.command(name="historial")
     async def historial(self, ctx):
-        """Muestra las últimas canciones reproducidas."""
-        if self.last_played:
+        """Muestra las últimas canciones reproducidas en este servidor."""
+        guild_id = ctx.guild.id if ctx.guild else None
+        history_titles = await asyncio.to_thread(get_recent_history, guild_id=guild_id, limit=10)
+        if not history_titles and self.last_played:
+            history_titles = self.last_played[:10]
+
+        if history_titles:
             description = "\n".join([
-                f"{i + 1}. **{title}**" for i, title in enumerate(self.last_played[:10])
+                f"{i + 1}. **{title}**" for i, title in enumerate(history_titles)
             ])
-            await ctx.send(embed=self.format_embed("🎧 Últimas Canciones Reproducidas", description))
+            embed_title = f"🎧 Últimas Canciones Reproducidas - {ctx.guild.name}" if ctx.guild else "🎧 Últimas Canciones Reproducidas"
+            await ctx.send(embed=self.format_embed(embed_title, description))
         else:
-            await ctx.send("📭 No hay historial reciente de reproducción.")
+            await ctx.send("📭 No hay historial reciente de reproducción en este servidor.")
 
     @commands.command(name="top")
     async def top(self, ctx):
-        """Muestra las canciones más reproducidas históricamente."""
-        top_songs = get_top_songs(10)
+        """Muestra las canciones más reproducidas en este servidor."""
+        guild_id = ctx.guild.id if ctx.guild else None
+        top_songs = await asyncio.to_thread(get_top_songs, guild_id=guild_id, limit=10)
         if top_songs:
             description = "\n".join([
                 f"{i + 1}. **{title}** – `{count} reproducciones`"
                 for i, (title, count) in enumerate(top_songs)
             ])
-            await ctx.send(embed=self.format_embed("📈 Top Canciones Más Reproducidas", description))
+            embed_title = f"📈 Top Canciones - {ctx.guild.name}" if ctx.guild else "📈 Top Canciones Más Reproducidas"
+            await ctx.send(embed=self.format_embed(embed_title, description))
         else:
-            await ctx.send("📭 No hay estadísticas de canciones aún.")
+            await ctx.send("📭 No hay estadísticas de canciones en este servidor aún.")
 
     def format_embed(self, title, content):
         embed = discord.Embed(

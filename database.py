@@ -123,17 +123,55 @@ def add_or_update_song(title, url=None, artist=None, duration=0):
         session.refresh(new_song)
         return new_song
 
-def get_top_songs(limit=10, offset=0):
-    """Obtiene las canciones más reproducidas desde la base de datos."""
+def get_top_songs(guild_id=None, limit=10, offset=0):
+    """Obtiene las canciones más reproducidas por servidor (guild_id) o globalmente."""
     with get_db_session() as session:
-        top_songs = (
+        if guild_id:
+            from sqlalchemy import func
+            results = (
+                session.query(Song.title, func.count(PlayLog.id).label('played_count'))
+                .join(PlayLog, Song.id == PlayLog.song_id)
+                .filter(PlayLog.guild_id == str(guild_id))
+                .group_by(Song.id, Song.title)
+                .order_by(func.count(PlayLog.id).desc())
+                .limit(limit)
+                .offset(offset)
+                .all()
+            )
+            if results:
+                return results
+
+        # Fallback global si no hay guild_id o no hay historial de servidor aún
+        return (
             session.query(Song.title, Song.played_count)
             .order_by(Song.played_count.desc())
             .limit(limit)
             .offset(offset)
             .all()
         )
-    return top_songs
+
+def get_recent_history(guild_id=None, limit=10):
+    """Obtiene el historial reciente de reproducción filtrado por servidor."""
+    with get_db_session() as session:
+        if guild_id:
+            results = (
+                session.query(Song.title)
+                .join(PlayLog, Song.id == PlayLog.song_id)
+                .filter(PlayLog.guild_id == str(guild_id))
+                .order_by(PlayLog.played_at.desc())
+                .limit(limit)
+                .all()
+            )
+            if results:
+                # Eliminar duplicados consecutivos manteniendo el orden
+                seen = set()
+                history = []
+                for (title,) in results:
+                    if title not in seen:
+                        seen.add(title)
+                        history.append(title)
+                return history
+    return []
 
 def get_top_songs_cached():
     """Devuelve las canciones más populares desde la caché en memoria."""
