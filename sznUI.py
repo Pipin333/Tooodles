@@ -332,11 +332,6 @@ class MusicUI(commands.Cog):
                     player.voice_client = None
                 player.current_song = None
                 await interaction.response.send_message("⏹️ Reproducción detenida y bot desconectado del canal.", ephemeral=True)
-                
-                try:
-                    await self.ctx.send("🛑 Reproducción detenida, bot desconectado y cola limpiada vía panel de control.")
-                except Exception:
-                    pass
             else:
                 await interaction.response.send_message("⚠️ El bot no está conectado a ningún canal.", ephemeral=True)
 

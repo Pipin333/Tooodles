@@ -136,12 +136,11 @@ class MusicDB(commands.Cog):
         """Muestra tus canciones favoritas."""
         songs = await asyncio.to_thread(self.get_liked_songs_by_user, str(ctx.author.id))
         if not songs:
-            await ctx.send("📭 No tienes canciones favoritas aún.")
+            await ctx.send("📭 No tienes canciones favoritas aún. Usa `td?like` mientras suena una canción.")
             return
-        message = "**🎵 Tus canciones favoritas:**\n"
-        for i, song in enumerate(songs[:10], 1):
-            message += f"{i}. **{song.title}**\n"
-        await ctx.send(message)
+        description = "\n".join([f"{i}. **{song.title}**" for i, song in enumerate(songs[:10], 1)])
+        embed = self.format_embed("❤️ Tus Canciones Favoritas", description)
+        await ctx.send(embed=embed)
 
     @commands.command()
     async def favradio(self, ctx, temperatura: float = 0.75):
@@ -164,7 +163,7 @@ class MusicDB(commands.Cog):
         liked_songs = self.get_liked_songs_by_users(user_ids)
 
         if not liked_songs:
-            await ctx.send("📭 Ninguno de los usuarios en llamada tiene canciones favoritas registradas. Usando canciones populares como base.")
+            await ctx.send("📭 Ningún participante en la llamada tiene canciones favoritas. Generando radio basada en el Top Global...")
             top_songs = get_top_songs(10)
             if not top_songs or not core.sp:
                 await ctx.send("⚠️ No se pudo generar recomendaciones.")
@@ -187,7 +186,7 @@ class MusicDB(commands.Cog):
             await ctx.send("❌ La conexión con Spotify no está configurada.")
             return
 
-        await ctx.send("🎧 Generando radio emocional colectiva...")
+        await ctx.send("🎧 **Radio Grupal Activada**: Generando recomendaciones basadas en gustos colectivos...")
         import random
         random_song = random.choice(liked_songs)
         results = core.sp.search(q=random_song.title, type='track', limit=1)
@@ -210,7 +209,7 @@ class MusicDB(commands.Cog):
             ])
             await ctx.send(embed=self.format_embed("🎧 Últimas Canciones Reproducidas", description))
         else:
-            await ctx.send("📭 No hay historial reciente.")
+            await ctx.send("📭 No hay historial reciente de reproducción.")
 
     @commands.command(name="top")
     async def top(self, ctx):
@@ -218,20 +217,20 @@ class MusicDB(commands.Cog):
         top_songs = get_top_songs(10)
         if top_songs:
             description = "\n".join([
-                f"{i + 1}. **{title}** – {count} reproducciones"
+                f"{i + 1}. **{title}** – `{count} reproducciones`"
                 for i, (title, count) in enumerate(top_songs)
             ])
             await ctx.send(embed=self.format_embed("📈 Top Canciones Más Reproducidas", description))
         else:
-            await ctx.send("📭 No hay canciones registradas en la base de datos.")
+            await ctx.send("📭 No hay estadísticas de canciones aún.")
 
     def format_embed(self, title, content):
         embed = discord.Embed(
             title=title,
             description=content,
-            color=discord.Color.purple()
+            color=0x7d5fff
         )
-        embed.set_footer(text="Basado en estadísticas de Tooodles")
+        embed.set_footer(text="Tooodles Music System")
         return embed
 
 async def setup(bot):

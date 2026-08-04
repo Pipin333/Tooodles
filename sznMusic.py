@@ -292,7 +292,7 @@ class MusicCore(commands.Cog):
                         pass
                 self.bot.loop.create_task(_preresolve())
 
-    async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada"):
+    async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada", notify: bool = True):
         player = self.get_player(ctx)
         song_info['origin'] = origin
         if ctx:
@@ -315,21 +315,24 @@ class MusicCore(commands.Cog):
         except Exception as e:
             print(f"⚠️ No se pudo guardar la canción en BD: {e}")
 
-        await ctx.send(f"🎶 Añadido a la cola: **{song_info['title']}** ({self.format_duration(song_info.get('duration', 0))})")
-
         vc = player.voice_client
         is_busy = vc and (vc.is_playing() or vc.is_paused())
+
+        # Solo enviar mensaje de "Añadido a la cola" si ya hay una canción sonando y notify=True
+        if notify and is_busy:
+            await ctx.send(f"🎶 Añadido a la cola: **{song_info['title']}** ({self.format_duration(song_info.get('duration', 0))})")
+
         if not player.current_song and not is_busy:
             await self.play_next(ctx)
         else:
             self.schedule_queue_optimizations(ctx)
 
-    async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube"):
+    async def add_from_youtube(self, ctx, query, origin="🎵 Búsqueda de YouTube", notify: bool = True):
         player = self.get_player(ctx)
         player.is_loading_song = True
         try:
             info = await extract_info(query)
-            await self.add_song_dict(ctx, info, origin)
+            await self.add_song_dict(ctx, info, origin, notify=notify)
         except Exception as e:
             print(f"❌ Error interno en la búsqueda/extracción: {e}", flush=True)
             await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
@@ -354,21 +357,29 @@ class MusicCore(commands.Cog):
         try:
             player = self.get_player(ctx)
             playlist_id = url.split("/")[-1].split("?")[0]
-            results = self.sp.playlist_tracks(playlist_id)
-            items = results.get('items', [])
-            if not items:
+
+            # Recolectar TODOS los tracks paginando la API de Spotify (límite: 100 por página)
+            all_items = []
+            results = self.sp.playlist_tracks(playlist_id, limit=100)
+            while results:
+                all_items.extend(results.get('items', []))
+                results = await asyncio.to_thread(self.sp.next, results) if results.get('next') else None
+
+            valid_items = [i for i in all_items if i.get('track') and i['track'].get('name')]
+            if not valid_items:
                 await ctx.send("📭 La playlist de Spotify está vacía.")
                 return
 
-            valid_items = [i for i in items if i.get('track')]
             await ctx.send(f"⚡ Carga de playlist Spotify ({len(valid_items)} canciones)...")
 
             first_track = valid_items[0]['track']
             first_query = f"{first_track['name']} {first_track['artists'][0]['name']}"
-            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist por {ctx.author.name}")
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist por {ctx.author.name}", notify=False)
 
             for item in valid_items[1:]:
                 track = item['track']
+                if not track or not track.get('name'):
+                    continue
                 title = f"{track['name']} - {track['artists'][0]['name']}"
                 song_dict = {
                     'title': title,
@@ -412,7 +423,7 @@ class MusicCore(commands.Cog):
             first_track = tracks[0]
             first_artist = first_track['artists'][0]['name'] if first_track.get('artists') else ''
             first_query = f"{first_track['name']} {first_artist}".strip()
-            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Álbum Spotify por {ctx.author.name}")
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Álbum Spotify por {ctx.author.name}", notify=False)
 
             for track in tracks[1:]:
                 artist_name = track['artists'][0]['name'] if track.get('artists') else ''
@@ -459,7 +470,7 @@ class MusicCore(commands.Cog):
 
             first_track = tracks[0]
             first_query = f"{first_track['name']} {artist_name}".strip()
-            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Top Artista por {ctx.author.name}")
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Top Artista por {ctx.author.name}", notify=False)
 
             for track in tracks[1:]:
                 title = f"{track['name']} - {artist_name}"
@@ -489,8 +500,6 @@ class MusicCore(commands.Cog):
     async def add_playlist_from_youtube(self, ctx, url):
         try:
             player = self.get_player(ctx)
-            await ctx.send("🔎 Procesando playlist de YouTube / YouTube Music...")
-            
             from sznUtils import extract_playlist_metadata
             items = await asyncio.to_thread(extract_playlist_metadata, url)
             
@@ -502,7 +511,7 @@ class MusicCore(commands.Cog):
 
             first_item = items[0]
             first_query = first_item.get('url') or first_item.get('title')
-            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist YouTube por {ctx.author.name}")
+            await self.add_from_youtube(ctx, first_query, origin=f"🎵 Playlist YouTube por {ctx.author.name}", notify=False)
 
             for item in items[1:]:
                 song_dict = {
