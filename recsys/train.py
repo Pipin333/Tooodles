@@ -16,6 +16,12 @@ Uso:
 import os
 import sys
 import time
+
+# Prevenir advertencias y contención de hilos de OpenBLAS/MKL en CPU multi-core
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
@@ -192,13 +198,13 @@ def train_als_model(interaction_matrix):
         random_state=42
     )
     
-    # implicit espera item-user matrix
-    item_user_matrix = positive_matrix.T.tocsr()
+    # implicit 0.6+ espera matriz user-item CSR (n_users x n_songs)
+    user_items = positive_matrix.tocsr()
     
     print(f"🧠 Entrenando Implicit ALS (factors={ALS_FACTORS}, "
           f"iterations={ALS_ITERATIONS})...")
     t0 = time.time()
-    model.fit(item_user_matrix)
+    model.fit(user_items)
     elapsed = time.time() - t0
     print(f"✅ ALS entrenado en {elapsed:.1f}s")
     
