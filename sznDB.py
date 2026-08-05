@@ -10,8 +10,11 @@ from database import (
     get_db_session,
     Song,
     UserLike,
+    UserDislike,
     AppConfig,
-    PlayLog
+    PlayLog,
+    log_dislike_event,
+    remove_dislike
 )
 
 class MusicDB(commands.Cog):
@@ -131,6 +134,32 @@ class MusicDB(commands.Cog):
             await ctx.send(f"❌ Canción eliminada de tus favoritas: **{core.current_song['title']}**")
         else:
             await ctx.send("ℹ️ Esta canción no estaba en tus favoritas.")
+
+    @commands.command()
+    async def dislike(self, ctx):
+        """Marca la canción actual como no gustada (feedback negativo para recomendaciones)."""
+        core = self.bot.get_cog("MusicCore")
+        if not core or not core.current_song:
+            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
+            return
+        added = await asyncio.to_thread(log_dislike_event, str(ctx.author.id), core.current_song['title'])
+        if added:
+            await ctx.send(f"👎 Canción marcada como no gustada: **{core.current_song['title']}**")
+        else:
+            await ctx.send("ℹ️ Ya habías marcado esta canción como no gustada.")
+
+    @commands.command()
+    async def undislike(self, ctx):
+        """Elimina la marca de no me gusta de la canción actual."""
+        core = self.bot.get_cog("MusicCore")
+        if not core or not core.current_song:
+            await ctx.send("⚠️ No hay ninguna canción en reproducción.")
+            return
+        removed = await asyncio.to_thread(remove_dislike, str(ctx.author.id), core.current_song['title'])
+        if removed:
+            await ctx.send(f"✅ Se eliminó la marca de no gustada: **{core.current_song['title']}**")
+        else:
+            await ctx.send("ℹ️ Esta canción no estaba marcada como no gustada.")
 
     @commands.command()
     async def liked(self, ctx):

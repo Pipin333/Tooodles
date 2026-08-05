@@ -11,6 +11,7 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from database import add_or_update_song, get_db_session, Song, UserLike
 from sznUtils import extract_info, fetch_stealth_cookies
+from recsys.engine import RecSysEngine
 
 SPOTIFY_CLIENT_ID = os.getenv('client_id')
 SPOTIFY_CLIENT_SECRET = os.getenv('client_secret')
@@ -164,6 +165,7 @@ class GuildPlayer:
         self.current_song_start_time = 0
         self.current_song_skipped = False
         self.radio_history = []
+        self.autoplay_mode = False  # Modo autoplay con RecSys ML
         self.play_lock = asyncio.Lock()
 
 
@@ -187,10 +189,22 @@ class MusicCore(commands.Cog):
             print(f"❌ Error al conectar con Spotify: {e}")
             self.sp = None
 
+        # Inicializar motor de recomendación ML
+        self.recsys_engine = RecSysEngine()
+        try:
+            self.recsys_engine.load()
+        except Exception as e:
+            print(f"ℹ️ [RecSys] Motor de recomendación no disponible: {e}")
+
         try:
             self.inactivity_check.start()
         except Exception as e:
             print(f"❌ Error al iniciar inactivity_check: {e}")
+
+        try:
+            self.recsys_training_loop.start()
+        except Exception as e:
+            print(f"⚠️ [RecSys] Error al iniciar loop de entrenamiento: {e}")
 
     def get_player(self, target) -> GuildPlayer:
         """Obtiene o crea la instancia de GuildPlayer asociada al servidor."""
@@ -549,6 +563,10 @@ class MusicCore(commands.Cog):
 
             if getattr(player, 'radio_mode', False) and len(player.song_queue) < 2:
                 await self.expand_radio_queue(ctx)
+
+            # RecSys Autoplay: si la cola está vacía y autoplay está activado
+            if not player.song_queue and getattr(player, 'autoplay_mode', False):
+                await self._fill_queue_from_recsys(ctx, player)
 
             if not player.song_queue:
                 await ctx.send("📭 La cola de canciones está vacía.")
@@ -1163,6 +1181,24 @@ class MusicCore(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
 
+    @tasks.loop(hours=6)
+    async def recsys_training_loop(self):
+        """Entrena el modelo de recomendación automáticamente cada 6 horas."""
+        try:
+            print("🔄 [RecSys] Iniciando entrenamiento automático...", flush=True)
+            from recsys.train import main as train_recsys
+            await asyncio.to_thread(train_recsys)
+            self.recsys_engine.load(force=True)
+            print("✅ [RecSys] Entrenamiento completado y motor recargado.", flush=True)
+        except Exception as e:
+            print(f"⚠️ [RecSys] Error en entrenamiento automático: {e}", flush=True)
+
+    @recsys_training_loop.before_loop
+    async def before_recsys_training(self):
+        """Espera a que el bot esté listo y 5 minutos extra antes del primer entrenamiento."""
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(300)  # 5 min de gracia al iniciar
+
     @tasks.loop(seconds=60)
     async def inactivity_check(self):
         for guild_id, player in list(self.players.items()):
@@ -1278,6 +1314,228 @@ class MusicCore(commands.Cog):
 
         if player.voice_client and not player.voice_client.is_playing() and not player.voice_client.is_paused():
             await self.play_next(ctx)
+
+    async def _fill_queue_from_recsys(self, ctx, player):
+        """Llena la cola usando el motor de recomendación ML cuando autoplay está activo."""
+        try:
+            # Recargar artefactos si fueron actualizados
+            self.recsys_engine.reload_if_updated()
+            
+            # Obtener IDs de usuarios en el canal de voz
+            user_ids = []
+            if ctx.author.voice and ctx.author.voice.channel:
+                user_ids = [str(m.id) for m in ctx.author.voice.channel.members if not m.bot]
+            
+            recommendations = []
+            
+            # Intentar con el motor ML primero
+            if self.recsys_engine.loaded:
+                recommendations = await asyncio.to_thread(
+                    self.recsys_engine.get_autoplay_recommendations,
+                    current_title=player.last_played_title,
+                    user_ids=user_ids if user_ids else None,
+                    recent_titles=list(player.radio_history),
+                    temperature=getattr(player, 'radio_temperature', 0.75),
+                    n=5
+                )
+            
+            # Fallback: recomendaciones basadas en historial del servidor (cold-start)
+            if not recommendations:
+                from database import get_cold_start_recommendations
+                guild_id = str(player.guild_id) if player.guild_id else None
+                recommendations = await asyncio.to_thread(
+                    get_cold_start_recommendations,
+                    guild_id=guild_id,
+                    exclude_titles=list(player.radio_history),
+                    limit=5
+                )
+            
+            if not recommendations:
+                return
+            
+            added_count = 0
+            for rec in recommendations:
+                title = rec.get('title', '')
+                if not title:
+                    continue
+                
+                # Verificar unicidad contra la cola actual
+                if any(title.lower() == s.get('title', '').lower() for s in player.song_queue):
+                    continue
+                
+                song_dict = {
+                    'title': title,
+                    'url': None,
+                    'duration': 0,
+                    'uploader': rec.get('artist', ''),
+                    'origin': '🤖 Autoplay ML',
+                    'user_id': None,
+                    'username': 'RecSys',
+                    'guild_id': str(player.guild_id),
+                    'id': None,
+                    'cache_path': None
+                }
+                player.song_queue.append(song_dict)
+                player.radio_history.append(title.lower())
+                if len(player.radio_history) > 30:
+                    player.radio_history.pop(0)
+                added_count += 1
+            
+            if added_count > 0:
+                source_info = recommendations[0].get('source', 'ml')
+                print(f"🤖 [RecSys] {added_count} canciones añadidas a la cola via {source_info}", flush=True)
+                
+        except Exception as e:
+            print(f"⚠️ [RecSys] Error en autoplay ML: {e}", flush=True)
+
+    @commands.command()
+    async def autoplay(self, ctx, *, arg: str = "on"):
+        """Activa o desactiva el autoplay inteligente basado en ML."""
+        player = self.get_player(ctx)
+        if arg.lower() in ("off", "stop", "desactivar"):
+            player.autoplay_mode = False
+            await ctx.send("🛑 Autoplay ML desactivado.")
+            return
+        
+        player.autoplay_mode = True
+        
+        if not self.recsys_engine.loaded:
+            await ctx.send("🤖 **Autoplay ML activado** (motor de recomendación no entrenado aún, se usará radio de Spotify como fallback).")
+        else:
+            stats = self.recsys_engine.stats
+            await ctx.send(
+                f"🤖 **Autoplay ML activado** — Motor cargado con "
+                f"{stats['n_songs']} canciones y {stats['n_users']} usuarios."
+            )
+        
+        # Si la cola está vacía y no hay nada sonando, llenar inmediatamente
+        if not player.song_queue and not (player.voice_client and player.voice_client.is_playing()):
+            await self._fill_queue_from_recsys(ctx, player)
+            if player.song_queue and player.voice_client and not player.voice_client.is_playing():
+                await self.play_next(ctx)
+
+    @commands.command()
+    async def reloadrecsys(self, ctx):
+        """Recarga los artefactos del motor de recomendación ML desde disco."""
+        msg = await ctx.send("🔄 Recargando motor de recomendación...")
+        success = await asyncio.to_thread(self.recsys_engine.load, True)
+        if success:
+            stats = self.recsys_engine.stats
+            await msg.edit(content=(
+                f"✅ Motor recargado: {stats['n_songs']} canciones, "
+                f"{stats['n_users']} usuarios, "
+                f"ALS={'✅' if stats['has_als'] else '❌'}, "
+                f"Item2Vec={'✅' if stats['has_item2vec'] else '❌'}"
+            ))
+        else:
+            await msg.edit(content="❌ No se pudieron cargar los artefactos. Ejecuta el entrenamiento primero.")
+
+    @commands.command()
+    async def preload(self, ctx, url: str = None, target: discord.User = None):
+        """Precarga una playlist de Spotify o YouTube directamente en la BBDD asignada a ti o a un usuario mencionado."""
+        if not url:
+            await ctx.send("⚠️ Por favor proporciona un enlace de playlist de Spotify o YouTube/YouTube Music. Ejemplo: `td?preload <URL> [@usuario]`")
+            return
+
+        target_user = target or ctx.author
+        target_user_id = str(target_user.id)
+        target_username = target_user.name
+
+        msg = await ctx.send(f"📥 Extrayendo canciones de la playlist/álbum para precargar como gustos de **@{target_username}**...")
+        tracks_to_preload = []
+
+        try:
+            url_clean = url.strip()
+            
+            # 1. Playlist de Spotify
+            if "spotify.com/playlist" in url_clean:
+                if not self.sp:
+                    await msg.edit(content="❌ La API de Spotify no está configurada.")
+                    return
+                playlist_id = url_clean.split("/")[-1].split("?")[0]
+                all_items = []
+                results = await asyncio.to_thread(self.sp.playlist_tracks, playlist_id, limit=100)
+                while results:
+                    all_items.extend(results.get('items', []))
+                    results = await asyncio.to_thread(self.sp.next, results) if results.get('next') else None
+
+                for item in all_items:
+                    t = item.get('track')
+                    if t and t.get('name'):
+                        artist_name = t['artists'][0]['name'] if t.get('artists') else ''
+                        tracks_to_preload.append({
+                            'title': f"{t['name']} - {artist_name}" if artist_name else t['name'],
+                            'artist': artist_name,
+                            'duration': int(t.get('duration_ms', 0) / 1000)
+                        })
+
+            # 2. Álbum de Spotify
+            elif "spotify.com/album" in url_clean:
+                if not self.sp:
+                    await msg.edit(content="❌ La API de Spotify no está configurada.")
+                    return
+                album_id = url_clean.split("/")[-1].split("?")[0]
+                album = await asyncio.to_thread(self.sp.album, album_id)
+                tracks = album.get('tracks', {}).get('items', [])
+                for t in tracks:
+                    if t and t.get('name'):
+                        artist_name = t['artists'][0]['name'] if t.get('artists') else ''
+                        tracks_to_preload.append({
+                            'title': f"{t['name']} - {artist_name}" if artist_name else t['name'],
+                            'artist': artist_name,
+                            'duration': int(t.get('duration_ms', 0) / 1000)
+                        })
+
+            # 3. YouTube / YouTube Music
+            elif "youtube.com" in url_clean or "youtu.be" in url_clean:
+                from sznUtils import extract_playlist_metadata
+                yt_tracks = await asyncio.to_thread(extract_playlist_metadata, url_clean)
+                for t in yt_tracks:
+                    tracks_to_preload.append({
+                        'title': t.get('title'),
+                        'artist': t.get('uploader'),
+                        'duration': t.get('duration', 0),
+                        'url': t.get('url')
+                    })
+
+            else:
+                await msg.edit(content="❌ Enlace no reconocido. Debe ser una playlist/álbum de Spotify o YouTube.")
+                return
+
+            if not tracks_to_preload:
+                await msg.edit(content="📭 No se encontraron canciones válidas en la playlist.")
+                return
+
+            await msg.edit(content=f"⚙️ Guardando **{len(tracks_to_preload)}** canciones en la BBDD asignadas a **@{target_username}**...")
+            
+            from database import bulk_preload_tracks
+            result = await asyncio.to_thread(
+                bulk_preload_tracks,
+                tracks=tracks_to_preload,
+                user_id=target_user_id,
+                username=target_username,
+                guild_id=str(ctx.guild.id) if ctx.guild else None
+            )
+
+            # Reentrenar RecSys en segundo plano inmediatamente
+            await msg.edit(content=f"🧠 Reentrenando motor ML con **{result['total']}** temas precargados para **@{target_username}**...")
+            from recsys.train import main as train_recsys
+            await asyncio.to_thread(train_recsys)
+            self.recsys_engine.load(force=True)
+
+            stats = self.recsys_engine.stats
+            await msg.edit(content=(
+                f"✅ **Precarga completada exitosamente para @{target_username}**!\n"
+                f"📊 **Resultados**:\n"
+                f"• Canciones procesadas: **{result['total']}**\n"
+                f"• Nuevas en BBDD: **{result['new_songs']}**\n"
+                f"• Likes añadidos a @{target_username}: **{result['likes_added']}**\n"
+                f"🚀 **Motor ML actualizado**: {stats['n_songs']} canciones y {stats['n_users']} usuarios listos para Autoplay."
+            ))
+
+        except Exception as e:
+            print(f"❌ Error en preload: {e}", flush=True)
+            await msg.edit(content=f"❌ Error durante la precarga: {e}")
 
 async def setup(bot):
     await bot.add_cog(MusicCore(bot))

@@ -58,6 +58,15 @@ class UserLike(Base):
     song_id = Column(Integer, ForeignKey('songs.id'), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+# Modelo para no me gusta / feedback negativo explícito por usuario
+class UserDislike(Base):
+    __tablename__ = 'dislikes'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, index=True, nullable=False)
+    song_id = Column(Integer, ForeignKey('songs.id'), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
 # Modelo para registro de reproducción y telemetría de recomendador
 class PlayLog(Base):
     __tablename__ = 'play_logs'
@@ -224,3 +233,310 @@ def update_song_features(title, spotify_id=None, genres=None, popularity=None):
                 song.genres = genres
             if popularity is not None:
                 song.popularity = popularity
+
+def log_dislike_event(user_id, song_title):
+    """Registra un dislike explícito de un usuario hacia una canción."""
+    with get_db_session() as session:
+        song = session.query(Song).filter_by(title=song_title).first()
+        if not song:
+            return False
+        existing = session.query(UserDislike).filter_by(user_id=str(user_id), song_id=song.id).first()
+        if not existing:
+            dislike = UserDislike(user_id=str(user_id), song_id=song.id)
+            session.add(dislike)
+            return True
+        return False
+
+def remove_dislike(user_id, song_title):
+    """Elimina un dislike existente de un usuario hacia una canción."""
+    with get_db_session() as session:
+        song = session.query(Song).filter_by(title=song_title).first()
+        if not song:
+            return False
+        existing = session.query(UserDislike).filter_by(user_id=str(user_id), song_id=song.id).first()
+        if existing:
+            session.delete(existing)
+            return True
+        return False
+
+def get_recsys_data():
+    """Exporta todos los datos necesarios para entrenar el sistema de recomendación.
+    
+    Retorna un diccionario con:
+    - 'play_logs': Lista de dicts con user_id, song_id, guild_id, listened_duration, 
+                   duration (de la canción), completed, skipped_at, played_at
+    - 'likes': Lista de dicts con user_id, song_id
+    - 'dislikes': Lista de dicts con user_id, song_id
+    - 'songs': Lista de dicts con id, title, artist, duration, spotify_id, genres, popularity
+    """
+    with get_db_session() as session:
+        # Play logs con duración de la canción
+        play_logs = []
+        logs = session.query(PlayLog, Song.duration).join(Song, PlayLog.song_id == Song.id).all()
+        for log, song_duration in logs:
+            play_logs.append({
+                'user_id': log.user_id,
+                'song_id': log.song_id,
+                'guild_id': log.guild_id,
+                'listened_duration': log.listened_duration or 0,
+                'song_duration': song_duration or 0,
+                'completed': log.completed,
+                'skipped_at': log.skipped_at,
+                'played_at': log.played_at
+            })
+
+        # Likes
+        likes = [{'user_id': l.user_id, 'song_id': l.song_id}
+                 for l in session.query(UserLike).all()]
+
+        # Dislikes
+        dislikes = [{'user_id': d.user_id, 'song_id': d.song_id}
+                    for d in session.query(UserDislike).all()]
+
+        # Catálogo de canciones
+        songs = []
+        for s in session.query(Song).all():
+            songs.append({
+                'id': s.id, 'title': s.title, 'artist': s.artist,
+                'duration': s.duration, 'spotify_id': s.spotify_id,
+                'genres': s.genres, 'popularity': s.popularity
+            })
+
+        return {
+            'play_logs': play_logs,
+            'likes': likes,
+            'dislikes': dislikes,
+            'songs': songs
+        }
+
+def get_session_sequences(guild_id=None, session_gap_minutes=30):
+    """Extrae secuencias de reproducción por sesión para entrenamiento Item2Vec.
+    
+    Una 'sesión' se define como una serie de canciones reproducidas consecutivamente
+    en el mismo guild sin una pausa mayor a session_gap_minutes entre ellas.
+    
+    Retorna: Lista de listas de song_id (cada sublista es una sesión).
+    """
+    from datetime import timedelta
+    with get_db_session() as session:
+        query = session.query(PlayLog).order_by(PlayLog.guild_id, PlayLog.played_at)
+        if guild_id:
+            query = query.filter(PlayLog.guild_id == str(guild_id))
+        
+        logs = query.all()
+        if not logs:
+            return []
+
+        sessions = []
+        current_session = [logs[0].song_id]
+        current_guild = logs[0].guild_id
+
+        for i in range(1, len(logs)):
+            prev = logs[i - 1]
+            curr = logs[i]
+            
+            time_gap = (curr.played_at - prev.played_at) if (curr.played_at and prev.played_at) else timedelta(hours=1)
+            same_guild = curr.guild_id == current_guild
+            
+            if same_guild and time_gap <= timedelta(minutes=session_gap_minutes):
+                current_session.append(curr.song_id)
+            else:
+                if len(current_session) >= 2:
+                    sessions.append(current_session)
+                current_session = [curr.song_id]
+                current_guild = curr.guild_id
+
+        if len(current_session) >= 2:
+            sessions.append(current_session)
+
+        return sessions
+
+def get_cold_start_recommendations(guild_id=None, exclude_titles=None, limit=10):
+    """Recomendaciones basadas en historial cuando no hay modelo ML entrenado.
+    
+    Estrategia: Puntúa canciones del servidor por popularidad + likes,
+    filtra recientes, y devuelve con algo de aleatoriedad.
+    Mucho mejor que el radio de Spotify para cold-start.
+    
+    Returns:
+        Lista de dicts: [{'song_id': int, 'title': str, 'artist': str, 'score': float}, ...]
+    """
+    import random
+    from sqlalchemy import func
+    
+    exclude_lower = set()
+    if exclude_titles:
+        exclude_lower = {t.lower().strip() for t in exclude_titles if t}
+    
+    with get_db_session() as session:
+        # Consultar canciones con sus stats del guild
+        query = (
+            session.query(
+                Song.id, Song.title, Song.artist,
+                func.count(PlayLog.id).label('play_count'),
+                func.avg(PlayLog.completed).label('avg_completed')
+            )
+            .outerjoin(PlayLog, Song.id == PlayLog.song_id)
+        )
+        
+        if guild_id:
+            query = query.filter(
+                (PlayLog.guild_id == str(guild_id)) | (PlayLog.guild_id.is_(None))
+            )
+        
+        query = query.group_by(Song.id, Song.title, Song.artist)
+        results = query.all()
+        
+        if not results:
+            return []
+        
+        # Obtener canciones con likes (bonus)
+        liked_song_ids = set()
+        likes = session.query(UserLike.song_id).all()
+        for (sid,) in likes:
+            liked_song_ids.add(sid)
+        
+        # Obtener canciones con dislikes (penalización)
+        disliked_song_ids = set()
+        dislikes = session.query(UserDislike.song_id).all()
+        for (sid,) in dislikes:
+            disliked_song_ids.add(sid)
+        
+        # Calcular score para cada canción
+        candidates = []
+        for song_id, title, artist, play_count, avg_completed in results:
+            if not title:
+                continue
+            if title.lower().strip() in exclude_lower:
+                continue
+            if song_id in disliked_song_ids:
+                continue
+            
+            score = float(play_count or 0)
+            
+            # Bonus por tasa de completación alta
+            if avg_completed and avg_completed > 0.7:
+                score *= 1.5
+            
+            # Bonus por tener likes
+            if song_id in liked_song_ids:
+                score *= 2.0
+            
+            # Un mínimo para canciones nuevas sin plays
+            score = max(score, 0.1)
+            
+            candidates.append({
+                'song_id': song_id,
+                'title': title,
+                'artist': artist or '',
+                'score': score,
+                'source': 'cold_start'
+            })
+        
+        if not candidates:
+            return []
+        
+        # Ordenar por score y tomar el top pool
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        pool_size = min(len(candidates), limit * 3)
+        pool = candidates[:pool_size]
+        
+        # Muestreo ponderado por score (no siempre el #1)
+        weights = [c['score'] for c in pool]
+        total_weight = sum(weights)
+        if total_weight > 0:
+            weights = [w / total_weight for w in weights]
+        else:
+            weights = [1.0 / len(pool)] * len(pool)
+        
+        n_select = min(limit, len(pool))
+        selected_indices = []
+        available = list(range(len(pool)))
+        
+        for _ in range(n_select):
+            if not available:
+                break
+            avail_weights = [weights[i] for i in available]
+            total_w = sum(avail_weights)
+            if total_w > 0:
+                avail_weights = [w / total_w for w in avail_weights]
+            else:
+                avail_weights = [1.0 / len(available)] * len(available)
+            
+            chosen = random.choices(available, weights=avail_weights, k=1)[0]
+            selected_indices.append(chosen)
+            available.remove(chosen)
+        
+        return [pool[i] for i in selected_indices]
+
+def bulk_preload_tracks(tracks: list[dict], user_id: str, username: str = None, guild_id: str = None) -> dict:
+    """Registra en lote una lista de canciones asociadas a una playlist/álbum.
+    
+    Para cada canción:
+      1. La agrega o recupera de la tabla `songs`.
+      2. Le asigna un `UserLike` para el usuario si no existe.
+      3. Registra una entrada en `play_logs` con tiempo consecutivo para simular una sesión.
+    
+    Returns:
+        dict con 'total': int, 'new_songs': int, 'likes_added': int
+    """
+    from datetime import datetime, timedelta
+    
+    user_id_str = str(user_id) if user_id else "unknown"
+    guild_id_str = str(guild_id) if guild_id else "default_guild"
+    base_time = datetime.utcnow() - timedelta(minutes=len(tracks))
+    
+    new_songs_count = 0
+    likes_count = 0
+    
+    with get_db_session() as session:
+        for idx, track_info in enumerate(tracks):
+            title = track_info.get('title', '').strip()
+            artist = track_info.get('artist') or track_info.get('uploader') or ''
+            duration = track_info.get('duration', 0)
+            url = track_info.get('url')
+            
+            if not title:
+                continue
+            
+            # 1. Tabla Song
+            song = session.query(Song).filter_by(title=title).first()
+            if not song:
+                song = Song(title=title, artist=artist, duration=duration, url=url, played_count=1)
+                session.add(song)
+                session.flush()
+                session.refresh(song)
+                new_songs_count += 1
+            else:
+                song.played_count = (song.played_count or 0) + 1
+                if not song.artist and artist:
+                    song.artist = artist
+                if not song.duration and duration:
+                    song.duration = duration
+                if not song.url and url:
+                    song.url = url
+            
+            # 2. UserLike
+            existing_like = session.query(UserLike).filter_by(user_id=user_id_str, song_id=song.id).first()
+            if not existing_like:
+                session.add(UserLike(user_id=user_id_str, song_id=song.id, timestamp=base_time + timedelta(seconds=idx)))
+                likes_count += 1
+            
+            # 3. PlayLog (simulando secuencia de sesión consecutiva)
+            play_log = PlayLog(
+                user_id=user_id_str,
+                username=username or "PreloadUser",
+                song_id=song.id,
+                guild_id=guild_id_str,
+                played_at=base_time + timedelta(seconds=idx * 2),
+                listened_duration=duration or 180,
+                completed=1,
+                skipped_at=None
+            )
+            session.add(play_log)
+
+    return {
+        'total': len(tracks),
+        'new_songs': new_songs_count,
+        'likes_added': likes_count
+    }
