@@ -258,23 +258,26 @@ class MusicUI(commands.Cog):
             super().__init__(timeout=300)
             self.core = core
             self.ctx = ctx
-            self.update_radio_button()
+            self.update_toggle_buttons()
 
         def get_player(self):
             return self.core.get_player(self.ctx)
 
-        def update_radio_button(self):
+        def update_toggle_buttons(self):
             player = self.get_player()
             for child in self.children:
-                if getattr(child, 'custom_id', None) == 'toggle_radio':
-                    if getattr(player, 'radio_mode', False):
+                if getattr(child, 'custom_id', None) == 'toggle_autoplay':
+                    if getattr(player, 'autoplay_mode', False):
                         child.style = discord.ButtonStyle.success
-                        child.label = "📻 Radio: On"
+                        child.label = "🤖 Autoplay: On"
                     else:
                         child.style = discord.ButtonStyle.secondary
-                        child.label = "📻 Radio: Off"
+                        child.label = "🤖 Autoplay: Off"
 
-        @discord.ui.button(label="⏯️ Pausa/Reanuda", style=discord.ButtonStyle.primary, custom_id="pause_resume")
+        def update_radio_button(self):
+            self.update_toggle_buttons()
+
+        @discord.ui.button(label="⏯️ Pausa/Reanuda", style=discord.ButtonStyle.primary, custom_id="pause_resume", row=0)
         async def pause_resume(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if not player.voice_client or not player.current_song:
@@ -290,7 +293,7 @@ class MusicUI(commands.Cog):
             else:
                 await interaction.response.send_message("⚠️ No hay reproducción activa.", ephemeral=True)
 
-        @discord.ui.button(label="⏭️ Saltar", style=discord.ButtonStyle.secondary, custom_id="skip")
+        @discord.ui.button(label="⏭️ Saltar", style=discord.ButtonStyle.secondary, custom_id="skip", row=0)
         async def skip(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if not player.voice_client:
@@ -304,26 +307,72 @@ class MusicUI(commands.Cog):
             else:
                 await interaction.response.send_message("🎵 La cola está vacía.", ephemeral=True)
 
-        @discord.ui.button(label="📻 Radio", style=discord.ButtonStyle.secondary, custom_id="toggle_radio")
-        async def toggle_radio(self, interaction: discord.Interaction, button: Button):
+        @discord.ui.button(label="❤️ Like", style=discord.ButtonStyle.secondary, custom_id="like_song", row=0)
+        async def like_song_button(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
-            player.radio_mode = not getattr(player, 'radio_mode', False)
-            self.update_radio_button()
-            status = "activado" if player.radio_mode else "desactivado"
+            if not player.current_song or not player.current_song.get('title'):
+                await interaction.response.send_message("⚠️ No hay ninguna canción en reproducción.", ephemeral=True)
+                return
+            
+            song_title = player.current_song['title']
+            user_id = str(interaction.user.id)
+            
+            from database import get_db_session, UserLike, Song
+            with get_db_session() as session:
+                song = session.query(Song).filter_by(title=song_title).first()
+                if song:
+                    existing = session.query(UserLike).filter_by(user_id=user_id, song_id=song.id).first()
+                    if existing:
+                        session.delete(existing)
+                        await interaction.response.send_message(f"❌ Eliminaste de tus favoritas: **{song_title}**", ephemeral=True)
+                    else:
+                        session.add(UserLike(user_id=user_id, song_id=song.id))
+                        await interaction.response.send_message(f"❤️ Guardaste en tus favoritas: **{song_title}**", ephemeral=True)
+                else:
+                    await interaction.response.send_message(f"❤️ Registrado me gusta para: **{song_title}**", ephemeral=True)
+
+        @discord.ui.button(label="👎 Dislike", style=discord.ButtonStyle.secondary, custom_id="dislike_song", row=0)
+        async def dislike_song_button(self, interaction: discord.Interaction, button: Button):
+            player = self.get_player()
+            if not player.current_song or not player.current_song.get('title'):
+                await interaction.response.send_message("⚠️ No hay ninguna canción en reproducción.", ephemeral=True)
+                return
+            
+            song_title = player.current_song['title']
+            user_id = str(interaction.user.id)
+            
+            import asyncio
+            from database import log_dislike_event, remove_dislike
+            added = await asyncio.to_thread(log_dislike_event, user_id, song_title)
+            if added:
+                await interaction.response.send_message(f"👎 Marcaste como no gustada: **{song_title}**", ephemeral=True)
+            else:
+                await asyncio.to_thread(remove_dislike, user_id, song_title)
+                await interaction.response.send_message(f"✅ Eliminaste la marca de no gustada: **{song_title}**", ephemeral=True)
+
+        @discord.ui.button(label="🤖 Autoplay", style=discord.ButtonStyle.secondary, custom_id="toggle_autoplay", row=1)
+        async def toggle_autoplay(self, interaction: discord.Interaction, button: Button):
+            player = self.get_player()
+            player.autoplay_mode = not getattr(player, 'autoplay_mode', False)
+            self.update_toggle_buttons()
+            status = "activado" if player.autoplay_mode else "desactivado"
             
             await interaction.response.edit_message(view=self)
             
-            if player.radio_mode and len(player.song_queue) < 2:
-                await self.core.expand_radio_queue(self.ctx)
-                
-            await interaction.followup.send(f"📻 Modo radio automático **{status}**.", ephemeral=True)
+            if player.autoplay_mode and not player.song_queue and not (player.voice_client and player.voice_client.is_playing()):
+                await self.core._fill_queue_from_recsys(self.ctx, player)
+                if player.song_queue and player.voice_client and not player.voice_client.is_playing():
+                    await self.core.play_next(self.ctx)
+                    
+            await interaction.followup.send(f"🤖 Autoplay ML **{status}**.", ephemeral=True)
 
-        @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop")
+        @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop", row=1)
         async def stop(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if player.voice_client:
                 player.song_queue.clear()
                 player.radio_mode = False
+                player.autoplay_mode = False
                 from sznMusic import cleanup_cache
                 cleanup_cache()
                 if player.voice_client:
