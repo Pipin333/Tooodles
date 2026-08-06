@@ -19,5 +19,7 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             cd ~/Tooodles
+            git fetch origin main
+            git reset --hard origin/main
             chmod +x start.sh
             ./start.sh
