@@ -93,16 +93,22 @@ class MusicUI(commands.Cog):
         if not ctx.guild or not ctx.command:
             return True
 
-        import asyncio
         from sznUtils import load_config
-        channel_id_str = await asyncio.to_thread(load_config, f"cmd_channel_{ctx.guild.id}")
-        if not channel_id_str:
+        channel_id_str = load_config(f"cmd_channel_{ctx.guild.id}")
+        if not channel_id_str or channel_id_str.strip() == "":
             return True
 
         if str(ctx.channel.id) == channel_id_str:
             return True
 
-        if ctx.command and ctx.command.name in ("channel", "canal", "settings", "persist", "persistencia", "join", "connect", "conectar", "unir", "j"):
+        exempt_commands = (
+            "channel", "canal", "settings", "persist", "persistencia", 
+            "join", "connect", "conectar", "unir", "j", "help", "ayuda",
+            "reloadrecsys"
+        )
+        cmd_name = getattr(ctx.command, 'name', '').lower()
+        invoked_with = getattr(ctx, 'invoked_with', '').lower()
+        if cmd_name in exempt_commands or invoked_with in exempt_commands:
             return True
 
         try:
@@ -530,22 +536,22 @@ class MusicUI(commands.Cog):
         if arg_lower in ("aqui", "aquí", "here", "this"):
             target_channel = ctx.channel
         else:
-            channel_id = None
-            if arg.startswith("<#") and arg.endswith(">"):
+            target_channel = None
+            import re
+            match = re.search(r'\d+', arg)
+            if match:
                 try:
-                    channel_id = int(arg[2:-1])
+                    channel_id = int(match.group(0))
+                    target_channel = ctx.guild.get_channel(channel_id)
                 except ValueError:
                     pass
-            else:
-                try:
-                    channel_id = int(arg)
-                except ValueError:
-                    pass
-                    
-            if channel_id:
-                target_channel = ctx.guild.get_channel(channel_id)
-            else:
-                target_channel = discord.utils.get(ctx.guild.text_channels, name=arg)
+            
+            if not target_channel:
+                clean_name = arg.strip().lstrip("#").lower()
+                target_channel = discord.utils.find(
+                    lambda c: isinstance(c, discord.TextChannel) and c.name.lower() == clean_name,
+                    ctx.guild.channels
+                )
 
         if not target_channel:
             await ctx.send("❌ No pude encontrar ese canal de texto. Menciónalo como `#nombre-canal` o escribe `td?channel aqui`.")

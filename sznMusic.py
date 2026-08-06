@@ -354,28 +354,55 @@ class MusicCore(commands.Cog):
         finally:
             player.is_loading_song = False
 
-    async def add_from_spotify(self, ctx, url):
-        if not self.sp:
-            await ctx.send("❌ La API de Spotify no está configurada.")
-            return
-        try:
-            track_id = url.split("/")[-1].split("?")[0]
-            track = self.sp.track(track_id)
-            query = f"{track['name']} {track['artists'][0]['name']}"
+    async def add_from_spotify(self, ctx, url, track_id=None):
+        import re
+        if not track_id:
+            match = re.search(r'track[/:]([a-zA-Z0-9]+)', url)
+            track_id = match.group(1) if match else url.split("/")[-1].split("?")[0]
+        
+        query = None
+        if self.sp and track_id:
+            try:
+                track = await asyncio.to_thread(self.sp.track, track_id)
+                query = f"{track['name']} {track['artists'][0]['name']}"
+            except Exception as e:
+                print(f"⚠️ Error al obtener track de Spotify API: {e}", flush=True)
+
+        if not query and track_id:
+            try:
+                import aiohttp
+                oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/track/{track_id}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(oembed_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            title = data.get('title')
+                            artist = data.get('author_name', '')
+                            if title:
+                                query = f"{title} {artist}".strip()
+            except Exception as e:
+                print(f"⚠️ Error en oEmbed de Spotify: {e}", flush=True)
+
+        if query:
             await self.add_from_youtube(ctx, query, origin=f"🎵 Spotify por {ctx.author.name}")
-        except Exception as e:
-            print(f"❌ Error al procesar enlace de Spotify: {e}", flush=True)
-    async def add_playlist_from_spotify(self, ctx, url):
+        else:
+            await ctx.send("❌ No se pudo procesar la canción de Spotify.")
+
+    async def add_playlist_from_spotify(self, ctx, url, playlist_id=None):
         if not self.sp:
             await ctx.send("❌ La API de Spotify no está configurada.")
             return
         try:
+            import re
+            if not playlist_id:
+                match = re.search(r'playlist[/:]([a-zA-Z0-9]+)', url)
+                playlist_id = match.group(1) if match else url.split("/")[-1].split("?")[0]
+
             player = self.get_player(ctx)
-            playlist_id = url.split("/")[-1].split("?")[0]
 
             # Recolectar TODOS los tracks paginando la API de Spotify (límite: 100 por página)
             all_items = []
-            results = self.sp.playlist_tracks(playlist_id, limit=100)
+            results = await asyncio.to_thread(self.sp.playlist_tracks, playlist_id, limit=100)
             while results:
                 all_items.extend(results.get('items', []))
                 results = await asyncio.to_thread(self.sp.next, results) if results.get('next') else None
@@ -419,14 +446,18 @@ class MusicCore(commands.Cog):
             print(f"❌ Error al procesar playlist de Spotify: {e}", flush=True)
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
 
-    async def add_album_from_spotify(self, ctx, url):
+    async def add_album_from_spotify(self, ctx, url, album_id=None):
         if not self.sp:
             await ctx.send("❌ La API de Spotify no está configurada.")
             return
         try:
+            import re
+            if not album_id:
+                match = re.search(r'album[/:]([a-zA-Z0-9]+)', url)
+                album_id = match.group(1) if match else url.split("/")[-1].split("?")[0]
+
             player = self.get_player(ctx)
-            album_id = url.split("/")[-1].split("?")[0]
-            album = self.sp.album(album_id)
+            album = await asyncio.to_thread(self.sp.album, album_id)
             album_name = album.get('name', 'Álbum')
             tracks = album.get('tracks', {}).get('items', [])
             if not tracks:
@@ -466,16 +497,20 @@ class MusicCore(commands.Cog):
             print(f"❌ Error al procesar álbum de Spotify: {e}", flush=True)
             await ctx.send("❌ Error al cargar el álbum de Spotify.")
 
-    async def add_artist_from_spotify(self, ctx, url):
+    async def add_artist_from_spotify(self, ctx, url, artist_id=None):
         if not self.sp:
             await ctx.send("❌ La API de Spotify no está configurada.")
             return
         try:
+            import re
+            if not artist_id:
+                match = re.search(r'artist[/:]([a-zA-Z0-9]+)', url)
+                artist_id = match.group(1) if match else url.split("/")[-1].split("?")[0]
+
             player = self.get_player(ctx)
-            artist_id = url.split("/")[-1].split("?")[0]
-            artist = self.sp.artist(artist_id)
+            artist = await asyncio.to_thread(self.sp.artist, artist_id)
             artist_name = artist.get('name', 'Artista')
-            top_tracks_res = self.sp.artist_top_tracks(artist_id)
+            top_tracks_res = await asyncio.to_thread(self.sp.artist_top_tracks, artist_id)
             tracks = top_tracks_res.get('tracks', [])
             if not tracks:
                 await ctx.send("📭 No se encontraron canciones para este artista.")
@@ -1008,14 +1043,23 @@ class MusicCore(commands.Cog):
             return
 
         q = query.strip()
-        if "spotify.com/track" in q:
-            await self.add_from_spotify(ctx, q)
-        elif "spotify.com/playlist" in q:
-            await self.add_playlist_from_spotify(ctx, q)
-        elif "spotify.com/album" in q:
-            await self.add_album_from_spotify(ctx, q)
-        elif "spotify.com/artist" in q:
-            await self.add_artist_from_spotify(ctx, q)
+        import re
+        spotify_match = re.search(r'(track|playlist|album|artist)[/:]([a-zA-Z0-9]+)', q)
+        if "spotify.com" in q or "spotify:" in q:
+            if spotify_match:
+                stype, sid = spotify_match.group(1), spotify_match.group(2)
+                if stype == "track":
+                    await self.add_from_spotify(ctx, q, track_id=sid)
+                elif stype == "playlist":
+                    await self.add_playlist_from_spotify(ctx, q, playlist_id=sid)
+                elif stype == "album":
+                    await self.add_album_from_spotify(ctx, q, album_id=sid)
+                elif stype == "artist":
+                    await self.add_artist_from_spotify(ctx, q, artist_id=sid)
+                else:
+                    await self.add_from_spotify(ctx, q)
+            else:
+                await self.add_from_spotify(ctx, q)
         elif "list=" in q or "playlist" in q:
             if "youtube.com" in q or "youtu.be" in q or "music.youtube.com" in q:
                 await self.add_playlist_from_youtube(ctx, q)

@@ -37,6 +37,14 @@ async def on_message(message):
         return
     await bot.process_commands(message)
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        return  # El canal restringido se notifica en check_command_channel
+    if isinstance(error, commands.CommandNotFound):
+        return
+    print(f"⚠️ Error en comando '{ctx.command}': {error}", flush=True)
+
 import signal
 
 async def graceful_shutdown(bot):

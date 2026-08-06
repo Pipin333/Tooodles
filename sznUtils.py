@@ -16,28 +16,37 @@ if FERNET_KEY:
     except Exception as e:
         print(f"⚠️ Error al inicializar Fernet: {e}")
 
+_CONFIG_CACHE = {}
+
 def save_config(key: str, value: str):
-    if fernet:
-        value = fernet.encrypt(value.encode()).decode()
-    with get_db_session() as session:
-        existing = session.query(AppConfig).filter_by(key=key).first()
-        if existing:
-            existing.value = value
-        else:
-            session.add(AppConfig(key=key, value=value))
+    _CONFIG_CACHE[key] = value
+    encrypted_val = fernet.encrypt(value.encode()).decode() if fernet else value
+    try:
+        with get_db_session() as session:
+            existing = session.query(AppConfig).filter_by(key=key).first()
+            if existing:
+                existing.value = encrypted_val
+            else:
+                session.add(AppConfig(key=key, value=encrypted_val))
+    except Exception as e:
+        print(f"⚠️ Error al guardar configuración '{key}' en BD: {e}", flush=True)
 
 def load_config(key: str) -> str | None:
+    if key in _CONFIG_CACHE:
+        return _CONFIG_CACHE[key]
     try:
         with get_db_session() as session:
             entry = session.query(AppConfig).filter_by(key=key).first()
             if entry:
-                if fernet:
+                raw_val = entry.value
+                if fernet and raw_val:
                     try:
-                        return fernet.decrypt(entry.value.encode()).decode()
+                        raw_val = fernet.decrypt(raw_val.encode()).decode()
                     except Exception as e:
                         print(f"❌ Error al desencriptar valor de {key}: {e}")
                         return None
-                return entry.value
+                _CONFIG_CACHE[key] = raw_val
+                return raw_val
     except Exception as e:
         print(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
     return None
@@ -284,11 +293,32 @@ async def extract_info(query: str) -> dict:
     if not query:
         raise ValueError("Consulta vacía.")
 
-    q = query.strip()
-    if "spotify.com" in q:
-        raise ValueError("Los enlaces de Spotify no pueden ser procesados directamente con yt-dlp por protección DRM. Usa los comandos/métodos de Spotify.")
-
     clean_query = q
+
+    if "spotify.com" in q or "spotify:" in q:
+        import re
+        match = re.search(r'(track|playlist|album|artist)[/:]([a-zA-Z0-9]+)', q)
+        resolved_title = None
+        if match:
+            stype, sid = match.group(1), match.group(2)
+            try:
+                import aiohttp
+                oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/{stype}/{sid}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(oembed_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            title = data.get('title')
+                            artist = data.get('author_name', '')
+                            if title:
+                                resolved_title = f"{title} {artist}".strip()
+            except Exception as e:
+                print(f"⚠️ Error al resolver oEmbed de Spotify: {e}", flush=True)
+
+        if resolved_title:
+            clean_query = resolved_title
+        else:
+            raise ValueError("No se pudieron extraer metadatos del enlace de Spotify. Por favor busca por nombre del tema.")
 
     if "soundcloud.com" in q:
         flat_meta = await asyncio.to_thread(extract_flat_metadata, q)
