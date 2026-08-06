@@ -290,9 +290,7 @@ async def extract_info(query: str) -> dict:
     """
     Extracción directa de audio vía yt-dlp con cookies + Node.js 22 EJS Solver.
     """
-    if not query:
-        raise ValueError("Consulta vacía.")
-
+    q = query.strip()
     clean_query = q
 
     if "spotify.com" in q or "spotify:" in q:

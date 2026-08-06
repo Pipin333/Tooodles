@@ -1060,8 +1060,15 @@ class MusicCore(commands.Cog):
                     await self.add_from_spotify(ctx, q)
             else:
                 await self.add_from_spotify(ctx, q)
-        elif "list=" in q or "playlist" in q:
-            if "youtube.com" in q or "youtu.be" in q or "music.youtube.com" in q:
+        elif "youtube.com" in q or "youtu.be" in q or "music.youtube.com" in q:
+            # Si el enlace es de un video específico (watch?v=...) y trae un Mix automático de YouTube (list=RD.../UL.../TL...), limpiar &list= para reproducir solo el tema individual
+            if "watch?v=" in q and ("list=RD" in q or "list=UL" in q or "list=TL" in q):
+                clean_url = re.sub(r'&list=[^&]+', '', q)
+                await self.add_from_youtube(ctx, clean_url, origin=f"🎵 Pedida por {ctx.author.name}")
+            elif "list=PL" in q or "list=OL" in q or ("playlist" in q and "watch?v=" not in q):
+                # Playlists reales de usuario/álbum
+                await self.add_playlist_from_youtube(ctx, q)
+            elif "list=" in q and "watch?v=" not in q:
                 await self.add_playlist_from_youtube(ctx, q)
             else:
                 await self.add_from_youtube(ctx, q, origin=f"🎵 Pedida por {ctx.author.name}")
