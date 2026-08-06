@@ -223,7 +223,12 @@ def extract_playlist_metadata(url: str) -> list[dict]:
             "skip_download": True,
             "quiet": True,
             "nocheckcertificate": True,
-            "cookiefile": cookie_path if cookie_path else None
+            "cookiefile": cookie_path if cookie_path else None,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["ios", "android", "mweb"]
+                }
+            }
         }
         clean_url = url.strip()
         if "music.youtube.com" in clean_url:
@@ -339,7 +344,7 @@ async def extract_info(query: str) -> dict:
             "js_runtimes": {"node": {"path": node_path}},
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["mweb", "web"]
+                    "player_client": ["ios", "android", "mweb"]
                 }
             }
         }

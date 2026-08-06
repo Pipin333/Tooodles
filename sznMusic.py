@@ -296,11 +296,12 @@ class MusicCore(commands.Cog):
                     print(f"⚠️ Error optimizando siguiente canción en cola: {e}", flush=True)
             self.bot.loop.create_task(_optimize_next())
 
-        # 2. Pre-resolver un máximo de 4 canciones posteriores para evitar saturación de red / HTTP 429
-        for song in player.song_queue[1:5]:
+        # 2. Pre-resolver un máximo de 4 canciones posteriores con retardo escalonado para evitar rate-limiting de YouTube
+        for idx, song in enumerate(player.song_queue[1:5]):
             if not song.get('url'):
-                async def _preresolve(s=song):
+                async def _preresolve(s=song, delay=(idx + 1) * 2):
                     try:
+                        await asyncio.sleep(delay)
                         resolved = await extract_info(s['title'])
                         s.update(resolved)
                     except Exception:
