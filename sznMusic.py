@@ -274,39 +274,40 @@ class MusicCore(commands.Cog):
 
     def schedule_queue_optimizations(self, target):
         """
-        Estrategia Híbrida de Rendimiento Multi-servidor:
-        - Canción 2 (Siguiente en cola): Precarga a disco en segundo plano.
-        - Canciones 3 en adelante: Pre-resolución de URLs en segundo plano.
+        Estrategia de Precarga Inteligente a los 30 Segundos:
+        Espera 30 segundos tras iniciar la reproducción de la canción actual para resolver
+        y precargar únicamente la siguiente canción en la cola (N+1).
+        Elimina por completo las peticiones en ráfaga y evita bloqueos anti-bot de YouTube.
         """
         player = self.get_player(target)
         if not player.song_queue:
             return
 
-        # 1. Optimizar Canción 2 (siguiente en sonar)
         next_song = player.song_queue[0]
-        if not next_song.get('cache_path'):
-            async def _optimize_next(s=next_song):
-                try:
+        if next_song.get('cache_path') or next_song.get('_is_optimizing'):
+            return
+
+        next_song['_is_optimizing'] = True
+
+        async def _delayed_optimize(s=next_song, p=player):
+            try:
+                # Esperar 30 segundos de reproducción continua
+                await asyncio.sleep(30)
+                
+                # Verificar que la canción sigue siendo la siguiente en la cola
+                if p.song_queue and p.song_queue[0] is s:
                     if not s.get('url'):
                         resolved = await extract_info(s['title'])
-                        s.update(resolved)
+                        if resolved:
+                            s.update(resolved)
                     if s.get('url'):
                         await prefetch_chunk_throttled(s)
-                except Exception as e:
-                    print(f"⚠️ Error optimizando siguiente canción en cola: {e}", flush=True)
-            self.bot.loop.create_task(_optimize_next())
+            except Exception as e:
+                print(f"⚠️ Error en precarga diferida a los 30s: {e}", flush=True)
+            finally:
+                s['_is_optimizing'] = False
 
-        # 2. Pre-resolver un máximo de 4 canciones posteriores con retardo escalonado para evitar rate-limiting de YouTube
-        for idx, song in enumerate(player.song_queue[1:5]):
-            if not song.get('url'):
-                async def _preresolve(s=song, delay=(idx + 1) * 2):
-                    try:
-                        await asyncio.sleep(delay)
-                        resolved = await extract_info(s['title'])
-                        s.update(resolved)
-                    except Exception:
-                        pass
-                self.bot.loop.create_task(_preresolve())
+        self.bot.loop.create_task(_delayed_optimize())
 
     async def add_song_dict(self, ctx, song_info: dict, origin: str = "🎵 Solicitada", notify: bool = True):
         player = self.get_player(ctx)
