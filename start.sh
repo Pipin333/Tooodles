@@ -2,7 +2,8 @@
 set -e
 
 echo "🚀 Actualizando repositorio desde Git..."
-git pull
+git fetch origin main
+git reset --hard origin/main
 
 echo "📦 Compilando nueva imagen de Docker..."
 docker build -t tooodles-bot .
