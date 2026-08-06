@@ -21,3 +21,6 @@ __pycache__/
 
 # RecSys (artefactos entrenados, regenerados diariamente)
 data/
+
+# Logs
+logs/

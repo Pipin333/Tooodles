@@ -28,6 +28,10 @@ from scipy.sparse import csr_matrix
 
 # Agregar el directorio raíz del proyecto al path para importar database.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from database import get_recsys_data, get_session_sequences
+from sznLogger import get_logger
+
+logger = get_logger("recsys")
 
 # Directorio donde se guardan los artefactos entrenados
 ARTIFACTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")

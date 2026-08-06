@@ -6,9 +6,9 @@ import discord
 from discord.ext import commands
 from database import setup_database
 from sznUtils import load_config, fetch_stealth_cookies
+from sznLogger import get_logger
 
-# Configuración básica de logs
-logging.basicConfig(level=logging.INFO)
+logger = get_logger("bot")
 
 # Intents necesarios para el bot
 intents = discord.Intents.default()
@@ -29,7 +29,7 @@ bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None
 
 @bot.event
 async def on_ready():
-    print(f'✅ Conectado exitosamente como {bot.user.name} ({bot.user.id})')
+    logger.info(f'✅ Conectado exitosamente como {bot.user.name} ({bot.user.id})')
 
 @bot.event
 async def on_message(message):

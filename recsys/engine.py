@@ -21,6 +21,9 @@ import random
 import time
 import numpy as np
 from typing import Optional
+from sznLogger import get_logger
+
+logger = get_logger("recsys")
 
 # Directorio de artefactos entrenados
 ARTIFACTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")

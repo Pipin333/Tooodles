@@ -1,0 +1,60 @@
+import logging
+from logging.handlers import RotatingFileHandler
+import os
+import sys
+
+# Ruta del directorio de logs
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Formateadores de texto
+CONSOLE_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)-14s | %(message)s"
+FILE_FORMAT = "%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d): %(message)s"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+class ColoredFormatter(logging.Formatter):
+    """Formateador con códigos de color ANSI para la consola."""
+    COLORS = {
+        logging.DEBUG: "\033[36m",      # Cyan
+        logging.INFO: "\033[32m",       # Verde
+        logging.WARNING: "\033[33m",    # Amarillo
+        logging.ERROR: "\033[31m",      # Rojo
+        logging.CRITICAL: "\033[41m\033[37m",  # Rojo fondo / Texto blanco
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelno, self.RESET)
+        levelname_original = record.levelname
+        record.levelname = f"{color}{levelname_original}{self.RESET}"
+        formatted = super().format(record)
+        record.levelname = levelname_original
+        return formatted
+
+def setup_logger(name: str = "tooodles", log_level: int = logging.INFO) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(log_level)
+
+    if logger.handlers:
+        return logger
+
+    # 1. Console Handler (con colores)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(ColoredFormatter(CONSOLE_FORMAT, datefmt=DATE_FORMAT))
+    logger.addHandler(console_handler)
+
+    # 2. File Handler (Rotativo: 5 MB por archivo, 3 backups)
+    log_file = os.path.join(LOGS_DIR, "tooodles.log")
+    file_handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter(FILE_FORMAT, datefmt=DATE_FORMAT))
+    logger.addHandler(file_handler)
+
+    return logger
+
+# Logger raíz
+root_logger = setup_logger("tooodles")
+
+def get_logger(submodule: str) -> logging.Logger:
+    """Retorna un logger hijo para un subsistema específico (ej: get_logger('recsys'))."""
+    return logging.getLogger(f"tooodles.{submodule}")

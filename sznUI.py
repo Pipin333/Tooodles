@@ -692,6 +692,45 @@ class MusicUI(commands.Cog):
         async def change_prefix_btn(self, interaction: discord.Interaction, button: Button):
             await interaction.response.send_modal(PrefixModal(self))
 
+    @commands.command(name="logs", aliases=["log"])
+    @commands.has_permissions(administrator=True)
+    async def view_logs(self, ctx, lines: int = 20):
+        """Muestra las últimas N líneas del archivo de logs del bot (Solo Admin)."""
+        import os
+        log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tooodles.log")
+        
+        if not os.path.exists(log_file):
+            await ctx.send("📭 Aún no existe el archivo de logs.")
+            return
+
+        lines = max(1, min(lines, 50))  # Límite entre 1 y 50 líneas
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                all_lines = f.readlines()
+                tail_lines = all_lines[-lines:] if len(all_lines) >= lines else all_lines
+
+            content = "".join(tail_lines).strip()
+            if not content:
+                await ctx.send("📭 El archivo de logs está vacío.")
+                return
+
+            import re
+            content = re.sub(r'\x1b\[[0-9;]*m', '', content)
+
+            if len(content) > 1900:
+                content = content[-1900:]
+
+            embed = discord.Embed(
+                title=f"📋 Últimas {len(tail_lines)} líneas de Logs",
+                description=f"```text\n{content}\n```",
+                color=0x7d5fff
+            )
+            embed.set_footer(text=f"Solicitado por @{ctx.author.name}")
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            await ctx.send(f"❌ Error al leer el archivo de logs: {e}")
+
         @discord.ui.button(label="❌ Cerrar", style=discord.ButtonStyle.danger, custom_id="close_settings")
         async def close_settings(self, interaction: discord.Interaction, button: Button):
             await interaction.message.delete()
