@@ -442,35 +442,51 @@ class RecSysEngine:
         if not self.loaded:
             return []
         
-        all_candidates = []
-        
         # Fuente 1: Similitud de canción (Item2Vec) — para continuidad de "vibe"
+        similar = []
         if current_title:
-            similar = self.recommend_similar_songs(current_title, n=20, use_item2vec=True)
+            similar = self.recommend_similar_songs(current_title, n=30, use_item2vec=True)
             if not similar:
-                # Fallback a ALS item factors si Item2Vec no tiene esa canción
-                similar = self.recommend_similar_songs(current_title, n=20, use_item2vec=False)
-            all_candidates.extend(similar)
+                similar = self.recommend_similar_songs(current_title, n=30, use_item2vec=False)
         
         # Fuente 2: Preferencias de usuarios (ALS) — para personalización
+        user_recs = []
         if user_ids:
             if len(user_ids) == 1:
-                user_recs = self.recommend_for_user(user_ids[0], n=20)
+                user_recs = self.recommend_for_user(user_ids[0], n=30)
             else:
-                user_recs = self.recommend_for_group(user_ids, n=20)
-            all_candidates.extend(user_recs)
+                user_recs = self.recommend_for_group(user_ids, n=30)
         
-        if not all_candidates:
+        if not similar and not user_recs:
             return []
+
+        # Normalizar scores de ambas fuentes a rango [0, 1] antes de combinar
+        combined_dict = {}
         
-        # Deduplicar por song_id, manteniendo el score más alto
-        seen = {}
-        for c in all_candidates:
-            sid = c.get('song_id')
-            if sid not in seen or c.get('score', 0) > seen[sid].get('score', 0):
-                seen[sid] = c
-        
-        deduplicated = sorted(seen.values(), key=lambda x: x.get('score', 0), reverse=True)
+        if similar:
+            max_sim = max([c.get('score', 1.0) for c in similar] or [1.0])
+            for c in similar:
+                sid = c['song_id']
+                norm_score = c.get('score', 0.0) / max_sim
+                c_copy = dict(c)
+                # Darle 70% de peso a la continuidad del género si hay canción sonando
+                c_copy['score'] = norm_score * (0.7 if user_recs else 1.0)
+                combined_dict[sid] = c_copy
+
+        if user_recs:
+            max_als = max([c.get('score', 1.0) for c in user_recs] or [1.0])
+            for c in user_recs:
+                sid = c['song_id']
+                norm_score = c.get('score', 0.0) / max_als
+                weight = 0.3 if similar else 1.0
+                if sid in combined_dict:
+                    combined_dict[sid]['score'] += norm_score * weight
+                else:
+                    c_copy = dict(c)
+                    c_copy['score'] = norm_score * weight
+                    combined_dict[sid] = c_copy
+
+        deduplicated = sorted(combined_dict.values(), key=lambda x: x.get('score', 0), reverse=True)
         
         # Aplicar re-ranking
         primary_user = user_ids[0] if user_ids else None
