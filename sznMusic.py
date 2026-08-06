@@ -1246,9 +1246,10 @@ class MusicCore(commands.Cog):
 
     @recsys_training_loop.before_loop
     async def before_recsys_training(self):
-        """Espera a que el bot esté listo y 5 minutos extra antes del primer entrenamiento."""
+        """Espera a que el bot esté listo y entrena inmediatamente si no hay artefactos pre-existentes."""
         await self.bot.wait_until_ready()
-        await asyncio.sleep(300)  # 5 min de gracia al iniciar
+        if self.recsys_engine and self.recsys_engine.loaded:
+            await asyncio.sleep(300)  # 5 min de gracia solo si ya había modelo cargado en disco
 
     @tasks.loop(seconds=60)
     async def inactivity_check(self):
