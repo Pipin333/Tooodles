@@ -802,46 +802,87 @@ class MusicUI(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error al leer el archivo de logs: {e}")
 
-    @commands.command(name="debug", aliases=["status", "botstatus"])
+    @commands.command(name="debug", aliases=["status", "botstatus", "health", "diag"])
     async def debug_status(self, ctx):
-        """Muestra el estado de diagnóstico y telemetría del sistema (Admin / Trusted / DM)."""
-        if not await self._is_authorized_admin_or_trusted(ctx):
-            await ctx.send("❌ Este comando requiere permisos de Administrador o estar en la lista Trusted.")
+        """Muestra el estado de diagnóstico y telemetría del sistema (exclusivo vía DM para usuarios Trusted)."""
+        if ctx.guild is not None:
+            await ctx.send("⚠️ El comando `status` / `debug` solo está disponible en Mensajes Directos (DM) para usuarios de confianza.")
             return
 
-        import os, sys, time, glob
+        if not await self._is_authorized_admin_or_trusted(ctx):
+            await ctx.send("❌ Este comando requiere estar registrado en la lista de usuarios Trusted.")
+            return
+
+        import os, sys, time, glob, shutil, tempfile
+        from datetime import datetime
+
+        # 1. Espacio en Disco
+        try:
+            total, used, free = shutil.disk_usage(tempfile.gettempdir())
+            used_pct = (used / total) * 100
+            disk_status = "🟢" if used_pct < 85 else ("⚠️" if used_pct < 95 else "🔴")
+            disk_str = f"{disk_status} `{used / (1024**3):.1f}GB / {total / (1024**3):.1f}GB ({used_pct:.1f}% usado)` (Libre: `{free / (1024**3):.1f}GB`)"
+        except Exception as e:
+            disk_str = f"⚠️ Error consultando disco: {e}"
+
+        # 2. Modo WAL de SQLite
+        try:
+            from database import engine
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                journal_mode = conn.execute(text("PRAGMA journal_mode;")).scalar()
+                busy_timeout = conn.execute(text("PRAGMA busy_timeout;")).scalar()
+            wal_str = f"🟢 **Modo WAL Activo** (`journal_mode={journal_mode}`, `busy_timeout={busy_timeout}ms`)"
+        except Exception as e:
+            wal_str = f"⚠️ Error consultando BBDD: {e}"
+
+        # 3. Motor RecSys ML
+        music_cog = self.bot.get_cog("MusicCore") or self.bot.get_cog("MusicPlayerMixin")
+        recsys_engine = getattr(music_cog, 'recsys_engine', None)
+        if recsys_engine:
+            stats = recsys_engine.stats
+            from recsys.train import ARTIFACTS_PATH
+            if os.path.exists(ARTIFACTS_PATH):
+                mtime = datetime.fromtimestamp(os.path.getmtime(ARTIFACTS_PATH)).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                mtime = "Sin entrenar en disco"
+
+            recsys_str = (
+                f"📊 **Canciones indexadas**: `{stats['n_songs']}`  •  **Usuarios**: `{stats['n_users']}`\n"
+                f"⚙️ **Modelos**: ALS `{'✅' if stats['has_als'] else '❌'}` | Item2Vec `{'✅' if stats['has_item2vec'] else '❌'}`\n"
+                f"⏱️ **Último entrenamiento**: `{mtime}`"
+            )
+        else:
+            recsys_str = "❌ No disponible"
+
+        # 4. Sistema y Caché
+        try:
+            temp_dir = tempfile.gettempdir()
+            cache_files = glob.glob(os.path.join(temp_dir, "cache_*.webm")) + glob.glob(os.path.join(temp_dir, "*.tmp"))
+            cache_size_bytes = sum(os.path.getsize(f) for f in cache_files if os.path.isfile(f))
+            n_guilds = len(self.bot.guilds)
+            n_vc = len(self.bot.voice_clients)
+
+            sys_str = (
+                f"🔊 **VCs Conectados**: `{n_vc}` de `{n_guilds}` servidores\n"
+                f"🧹 **Archivos Caché /tmp**: `{len(cache_files)}` archivos (`{cache_size_bytes / (1024**2):.1f} MB`)\n"
+                f"🐍 **Python**: `{sys.version.split()[0]}`  •  **discord.py**: `{discord.__version__}`"
+            )
+        except Exception as e:
+            sys_str = f"⚠️ Error consultando sistema: {e}"
+
         embed = discord.Embed(
-            title="🤖 Diagnóstico y Estado del Bot",
-            color=0x00d2d3,
+            title="📋 Toodles — Ficha Técnica y Diagnóstico de Sistema",
+            description="Información de salud del servidor, almacenamiento en disco, base de datos y modelo de recomendación ML.",
+            color=0x7d5fff,
             timestamp=discord.utils.utcnow()
         )
-        
-        # Conexiones
-        n_guilds = len(self.bot.guilds)
-        n_vc = len(self.bot.voice_clients)
-        embed.add_field(name="🌐 Discord", value=f"• Servidores: **{n_guilds}**\n• Canales de voz activos: **{n_vc}**", inline=True)
-        
-        # Archivos de logs & caché
-        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tooodles.log")
-        log_size = (os.path.getsize(log_path) / (1024 * 1024)) if os.path.exists(log_path) else 0.0
-        
-        import tempfile
-        tmp_dir = tempfile.gettempdir()
-        cache_files = glob.glob(os.path.join(tmp_dir, "cache_*.webm"))
-        embed.add_field(name="💾 Almacenamiento & Logs", value=f"• Log File: **{log_size:.2f} MB**\n• Audios en `/tmp`: **{len(cache_files)} archivos**", inline=True)
-        
-        # RecSys Engine Status
-        music_cog = self.bot.get_cog("Music")
-        recsys_status = "❌ Inactivo"
-        if music_cog and getattr(music_cog, 'recsys', None):
-            rc = music_cog.recsys
-            if rc.loaded:
-                n_users = len(rc.user_id_map)
-                n_songs = len(rc.song_id_map)
-                recsys_status = f"✅ Cargado ({n_users} usuarios, {n_songs} canciones, 520 dims)"
-        
-        embed.add_field(name="🧠 Motor RecSys Híbrido", value=f"• Estado: {recsys_status}", inline=False)
-        embed.set_footer(text=f"Solicitado por @{ctx.author.name}")
+        embed.add_field(name="💾 Espacio en Disco (/tmp)", value=disk_str, inline=False)
+        embed.add_field(name="🗄️ Base de Datos (SQLite)", value=wal_str, inline=False)
+        embed.add_field(name="🧠 Motor RecSys ML", value=recsys_str, inline=False)
+        embed.add_field(name="🔊 Sistema y Caché", value=sys_str, inline=False)
+        embed.set_footer(text=f"Solicitado vía DM Trusted  •  @{ctx.author.name}")
+
         await ctx.send(embed=embed)
 
     @commands.command(name="train", aliases=["recsys_train"])
