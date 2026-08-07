@@ -19,11 +19,12 @@ except Exception as e:
     sys.__stderr__.write(f"⚠️ No se pudo inicializar el archivo de logs en disk: {e}\n")
 
 class DualStreamWriter:
-    """Duplica automáticamente cualquier print() o excepción lanzada a stdout/stderr en el archivo tooodles.log."""
+    """Duplica automáticamente cualquier print() o excepción lanzada a stdout/stderr en el archivo tooodles.log con fecha y hora."""
     def __init__(self, original_stream, log_file_path):
         self.original_stream = original_stream
         self.log_file_path = log_file_path
         self._file = None
+        self._at_line_start = True
 
     def _get_file(self):
         if self._file is None or self._file.closed:
@@ -39,10 +40,32 @@ class DualStreamWriter:
             pass
         try:
             f = self._get_file()
-            # Remover códigos de escape de color ANSI antes de escribir al archivo plano
             import re
             clean_message = re.sub(r'\x1b\[[0-9;]*m', '', message)
-            f.write(clean_message)
+
+            # Si ya incluye fecha y hora (ej. de logging.Formatter), escribir directamente
+            if re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', clean_message):
+                f.write(clean_message)
+                self._at_line_start = clean_message.endswith('\n')
+            else:
+                lines = clean_message.split('\n')
+                now_str = time.strftime('%Y-%m-%d %H:%M:%S')
+                formatted_parts = []
+                for idx, line in enumerate(lines):
+                    if idx == 0:
+                        if self._at_line_start and line.strip():
+                            formatted_parts.append(f"{now_str} | {line}")
+                        else:
+                            formatted_parts.append(line)
+                    else:
+                        if line.strip():
+                            formatted_parts.append(f"{now_str} | {line}")
+                        elif idx < len(lines) - 1:
+                            formatted_parts.append("")
+
+                f.write('\n'.join(formatted_parts))
+                self._at_line_start = clean_message.endswith('\n')
+
         except Exception:
             pass
 

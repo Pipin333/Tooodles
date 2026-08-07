@@ -226,7 +226,7 @@ def extract_playlist_metadata(url: str) -> list[dict]:
             "cookiefile": cookie_path if cookie_path else None,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"]
+                    "player_client": ["mweb", "tv_embedded"]
                 }
             }
         }
@@ -344,7 +344,7 @@ async def extract_info(query: str) -> dict:
             "js_runtimes": {"node": {"path": node_path}},
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "mweb"]
+                    "player_client": ["mweb", "tv_embedded"]
                 }
             }
         }
