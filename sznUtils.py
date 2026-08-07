@@ -457,6 +457,9 @@ async def extract_info(query: str) -> dict:
         if flat_meta and flat_meta.get('title'):
             clean_query = f"{flat_meta['title']} {flat_meta.get('uploader', '')}".strip()
 
+    if "music.youtube.com" in clean_query:
+        clean_query = clean_query.replace("music.youtube.com", "www.youtube.com")
+
     search_target = clean_query if clean_query.startswith("http") else f"ytsearch:{clean_query}"
     cookie_path = get_cookie_file_path()
 

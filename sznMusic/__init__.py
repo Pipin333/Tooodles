@@ -337,15 +337,20 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                 continue
             vc = player.voice_client
             if vc and not vc.is_playing() and not getattr(vc, 'is_paused', lambda: False)() and not player.song_queue:
-                await vc.disconnect()
+                ctx_to_notify = player.last_ctx
                 player.voice_client = None
                 player.current_song = None
                 player.radio_mode = False
+                player.last_ctx = None
                 cleanup_cache()
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    pass
                 logger.info(f"✅ Desconectado por inactividad en guild {guild_id}.")
-                if player.last_ctx:
+                if ctx_to_notify:
                     try:
-                        await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 60 segundos).")
+                        await ctx_to_notify.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 60 segundos).")
                     except Exception:
                         pass
 
@@ -357,26 +362,32 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                     return
 
                 player = self.get_player(member.guild)
-                from sznUtils import save_guild_queue, is_guild_persist_enabled
-                if is_guild_persist_enabled(member.guild.id):
-                    full_queue = []
-                    if player.current_song:
-                        full_queue.append(player.current_song)
-                    full_queue.extend(player.song_queue)
-                    if full_queue:
-                        save_guild_queue(member.guild.id, full_queue)
+                # Solo notificar y procesar si el bot tenía un voice_client o canción activa
+                was_connected = player.voice_client is not None or player.current_song is not None
+                ctx_to_notify = player.last_ctx if was_connected else None
 
-                player.song_queue.clear()
-                player.radio_mode = False
-                cleanup_cache()
-                player.voice_client = None
-                player.current_song = None
-                
-                if player.last_ctx:
-                    try:
-                        await player.last_ctx.send("🔌 Me he desconectado del canal de voz (desconexión manual o externa).")
-                    except Exception:
-                        pass
+                if was_connected:
+                    from sznUtils import save_guild_queue, is_guild_persist_enabled
+                    if is_guild_persist_enabled(member.guild.id):
+                        full_queue = []
+                        if player.current_song:
+                            full_queue.append(player.current_song)
+                        full_queue.extend(player.song_queue)
+                        if full_queue:
+                            save_guild_queue(member.guild.id, full_queue)
+
+                    player.song_queue.clear()
+                    player.radio_mode = False
+                    player.voice_client = None
+                    player.current_song = None
+                    player.last_ctx = None
+                    cleanup_cache()
+                    
+                    if ctx_to_notify:
+                        try:
+                            await ctx_to_notify.send("🔌 Me he desconectado del canal de voz (desconexión manual o externa).")
+                        except Exception:
+                            pass
 
         elif before.channel and (not after.channel or after.channel.id != before.channel.id):
             player = self.get_player(member.guild)
@@ -396,9 +407,11 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                                 if full_queue:
                                     save_guild_queue(member.guild.id, full_queue)
 
+                            ctx_to_notify = player.last_ctx
                             player.song_queue.clear()
                             player.radio_mode = False
                             player.current_song = None
+                            player.last_ctx = None
                             cleanup_cache()
                             try:
                                 if player.voice_client:
@@ -408,9 +421,9 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                                 pass
                             player.voice_client = None
                             
-                            if player.last_ctx:
+                            if ctx_to_notify:
                                 try:
-                                    await player.last_ctx.send("👤 Me he desconectado automáticamente al quedarme solo en el canal. (La cola fue guardada en BD).")
+                                    await ctx_to_notify.send("👤 Me he desconectado automáticamente al quedarme solo en el canal. (La cola fue guardada en BD).")
                                 except Exception:
                                     pass
 

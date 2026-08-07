@@ -143,6 +143,34 @@ class ColoredFormatter(logging.Formatter):
         return formatted
 
 
+class SafeStreamWrapper:
+    """Wrapper de seguridad para sys.__stdout__ que reemplaza caracteres no soportados
+    en consolas Windows (cp1252/cp850) en lugar de lanzar UnicodeEncodeError."""
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, data):
+        if not data:
+            return
+        try:
+            self.stream.write(data)
+        except UnicodeEncodeError:
+            target_enc = getattr(self.stream, 'encoding', None) or 'utf-8'
+            safe_str = data.encode(target_enc, errors='replace').decode(target_enc, errors='replace')
+            try:
+                self.stream.write(safe_str)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            self.stream.flush()
+        except Exception:
+            pass
+
+
 def setup_logger(name: str = "tooodles", log_level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
@@ -150,10 +178,8 @@ def setup_logger(name: str = "tooodles", log_level: int = logging.INFO) -> loggi
     if logger.handlers:
         return logger
 
-    # 1. Console Handler — usa sys.__stdout__ (el stream REAL, no DualStreamWriter)
-    #    para evitar que el output del logger pase por DualStreamWriter y se duplique
-    #    en el archivo de log (RotatingFileHandler ya lo escribe al archivo).
-    console_handler = logging.StreamHandler(sys.__stdout__)
+    # 1. Console Handler — usa SafeStreamWrapper(sys.__stdout__) para prevenir UnicodeEncodeError
+    console_handler = logging.StreamHandler(SafeStreamWrapper(sys.__stdout__))
     console_handler.setFormatter(ColoredFormatter(CONSOLE_FORMAT, datefmt=DATE_FORMAT))
     logger.addHandler(console_handler)
 
