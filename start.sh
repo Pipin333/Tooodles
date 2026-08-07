@@ -8,8 +8,8 @@ git reset --hard origin/main
 echo "📦 Compilando nueva imagen de Docker..."
 docker build -t tooodles-bot .
 
-echo "🛑 Solicitando vaciado suave (esperando fin de la canción actual)..."
-docker stop -t 600 tooodles 2>/dev/null || true
+echo "🛑 Solicitando vaciado suave (esperando fin de la canción actual, máx 60s)..."
+docker stop -t 60 tooodles 2>/dev/null || true
 docker rm tooodles 2>/dev/null || true
 
 echo "▶️ Lanzando nuevo contenedor Tooodles Bot..."
