@@ -208,7 +208,12 @@ def train_als_model(interaction_matrix):
     print(f"🧠 Entrenando Implicit ALS (factors={ALS_FACTORS}, "
           f"iterations={ALS_ITERATIONS})...")
     t0 = time.time()
-    model.fit(user_items)
+    try:
+        from threadpoolctl import threadpool_limits
+        with threadpool_limits(limits=1, user_api='blas'):
+            model.fit(user_items)
+    except ImportError:
+        model.fit(user_items)
     elapsed = time.time() - t0
     print(f"✅ ALS entrenado en {elapsed:.1f}s")
     

@@ -114,7 +114,10 @@ Tooodles/
 ├── main.py                        # Bot startup, graceful drain, signal handling, cog loading
 ├── database.py                    # SQLAlchemy models (Song, AppConfig, UserLike) & session handlers
 ├── sznUtils.py                    # Audio extraction engine, queue persistence functions
-├── sznMusic.py                    # MusicCore cog: queue, FFmpeg, Spotify, buffering, now-playing
+├── sznMusic/                      # Paquete modular MusicCore: cola, FFmpeg, Spotify, buffering, radio y comandos
+│   ├── __init__.py                # Cog MusicCore, setup(bot) y comandos de Discord
+│   ├── player.py                  # GuildPlayer, precarga/caché de audio y extractor Spotify/YouTube
+│   └── radio.py                   # Algoritmo de radio contextual por géneros y recomendaciones RecSys ML
 ├── sznDB.py                       # MusicDB cog: likes, top songs, history, group radio
 ├── sznUI.py                       # MusicUI cog: interactive buttons, paginated queue UI, embeds, persist toggle
 ├── requirements.txt               # Python dependencies
@@ -191,7 +194,7 @@ Audio extraction module and persistence utilities.
 
 ---
 
-### `sznMusic.py`
+### `sznMusic/`
 
 Core music player handling queue logic, playback, Spotify resolution, and persistence.
 

@@ -213,6 +213,51 @@ def get_cookie_file_path() -> str | None:
 
     return None
 
+class ExtractionError(Exception):
+    """Excepción base para errores de extracción de audio y metadatos."""
+    pass
+
+class RateLimitError(ExtractionError):
+    """YouTube o el servidor devolvió HTTP 429 Too Many Requests (límite de peticiones de IP)."""
+    pass
+
+class ForbiddenBlockError(ExtractionError):
+    """YouTube o el servidor devolvió HTTP 403 Forbidden o detección de bot."""
+    pass
+
+def check_yt_error(e: Exception) -> ExtractionError | None:
+    """Analiza una excepción devuelta por yt-dlp y la clasifica si es un bloqueo de IP o rate limit."""
+    err_str = str(e).lower()
+    if "429" in err_str or "too many requests" in err_str:
+        return RateLimitError("YouTube ha limitado temporalmente las peticiones de la IP del bot (HTTP 429 Too Many Requests).")
+    if "403" in err_str or "forbidden" in err_str or "confirm you're not a bot" in err_str or "bot" in err_str or "blocked" in err_str:
+        return ForbiddenBlockError("YouTube ha bloqueado el acceso por tráfico automatizado (HTTP 403 / Bot Block).")
+    return None
+
+def get_proxy_list() -> list[str]:
+    """Obtiene la lista de proxies formateados desde BD (load_config) o variables de entorno."""
+    raw = load_config("proxy_list") or os.getenv("PROXY_LIST") or os.getenv("YTDLP_PROXIES")
+    if not raw:
+        return []
+    
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            items = json.loads(raw)
+            return [str(i).strip() for i in items if i and str(i).strip()]
+        except Exception:
+            pass
+
+    parts = [p.strip() for p in raw.replace("\n", ",").split(",") if p.strip()]
+    return parts
+
+def redact_proxy(proxy_url: str) -> str:
+    """Oculta las credenciales de un proxy para evitar fugas en logs."""
+    import re
+    if not proxy_url:
+        return ""
+    return re.sub(r'://([^:@]+):([^@]+)@', r'://***:***@', proxy_url)
+
 def extract_playlist_metadata(url: str) -> list[dict]:
     """Extrae metadatos planos de playlists de YouTube o YouTube Music."""
     try:
@@ -259,6 +304,42 @@ def extract_playlist_metadata(url: str) -> list[dict]:
             return result
     except Exception as e:
         print(f"⚠️ Error al extraer playlist de YouTube: {e}", flush=True)
+        classified = check_yt_error(e)
+        if classified:
+            proxies = get_proxy_list()
+            if proxies:
+                for p_url in proxies:
+                    try:
+                        print(f"🔄 Reintentando extracción de playlist vía proxy: {redact_proxy(p_url)}", flush=True)
+                        proxy_opts = dict(ydl_opts)
+                        proxy_opts["proxy"] = p_url
+                        with YoutubeDL(proxy_opts) as ydl_p:
+                            info_p = ydl_p.extract_info(clean_url, download=False)
+                            if info_p:
+                                entries_p = info_p.get('entries') or []
+                                res_p = []
+                                for entry_p in entries_p:
+                                    if not entry_p or not isinstance(entry_p, dict):
+                                        continue
+                                    v_id = entry_p.get('id')
+                                    v_url = entry_p.get('url') or (f"https://www.youtube.com/watch?v={v_id}" if v_id else None)
+                                    v_title = entry_p.get('title')
+                                    v_uploader = entry_p.get('uploader') or entry_p.get('artist') or 'YouTube'
+                                    v_duration = entry_p.get('duration', 0)
+                                    if v_title and v_title not in ('[Private video]', '[Deleted video]'):
+                                        res_p.append({
+                                            'title': v_title,
+                                            'url': v_url,
+                                            'duration': v_duration or 0,
+                                            'uploader': v_uploader,
+                                            'id': v_id
+                                        })
+                                if res_p:
+                                    print(f"✅ Playlist resuelta exitosamente vía proxy ({redact_proxy(p_url)})", flush=True)
+                                    return res_p
+                    except Exception as proxy_err:
+                        print(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}", flush=True)
+            raise classified from e
     return []
 
 def extract_flat_metadata(query: str) -> dict | None:
@@ -374,9 +455,46 @@ async def extract_info(query: str) -> dict:
                     'thumbnail': entry.get('thumbnail', '')
                 }
     except Exception as e:
-        print(f"⚠️ Extracción yt-dlp falló: {e}", flush=True)
+        print(f"⚠️ Extracción yt-dlp directa falló: {e}", flush=True)
+        classified = check_yt_error(e)
+        if classified:
+            proxies = get_proxy_list()
+            if proxies:
+                for p_url in proxies:
+                    try:
+                        print(f"🔄 Reintentando extracción vía proxy de rescate: {redact_proxy(p_url)}", flush=True)
+                        proxy_opts = dict(ydl_opts)
+                        proxy_opts["proxy"] = p_url
+                        def _yt_extract_proxy():
+                            with YoutubeDL(proxy_opts) as ydl_p:
+                                return ydl_p.extract_info(search_target, download=False)
+                        info_p = await asyncio.to_thread(_yt_extract_proxy)
+                        if info_p:
+                            entry_p = info_p['entries'][0] if 'entries' in info_p and info_p['entries'] else info_p
+                            stream_url_p = entry_p.get('url')
+                            formats_p = entry_p.get('formats', [])
+                            if not stream_url_p and formats_p:
+                                valid_audio_p = [f for f in formats_p if f.get('url') and f.get('acodec') != 'none']
+                                if valid_audio_p:
+                                    best_valid_p = sorted(valid_audio_p, key=lambda x: int(x.get('tbr') or x.get('bitrate') or 0), reverse=True)[0]
+                                    stream_url_p = best_valid_p['url']
 
-    raise RuntimeError(f"No se pudo resolver el stream de audio para: '{query}'")
+                            if stream_url_p:
+                                print(f"✅ Stream resuelto exitosamente vía proxy ({redact_proxy(p_url)}): {entry_p.get('title')}", flush=True)
+                                return {
+                                    'id': entry_p.get('id', 'direct'),
+                                    'title': entry_p.get('title', clean_query),
+                                    'url': stream_url_p,
+                                    'duration': entry_p.get('duration', 0),
+                                    'uploader': entry_p.get('uploader', 'Artist'),
+                                    'thumbnail': entry_p.get('thumbnail', '')
+                                }
+                    except Exception as proxy_err:
+                        print(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}", flush=True)
+            raise classified from e
+        raise ExtractionError(f"No se pudo resolver el stream de audio para: '{query}'") from e
+
+    raise ExtractionError(f"No se pudo resolver el stream de audio para: '{query}'")
 
 def extract_local_audio_features(file_path: str) -> dict:
     """Extrae características acústicas reales (BPM, Energía RMS, Brillo Espectral, Zero Crossing)

@@ -887,7 +887,7 @@ class MusicUI(commands.Cog):
             embed.add_field(
                 name="📋 Diagnóstico y Logs",
                 value="• `logs [N]` — Muestra las últimas N líneas del archivo de logs (`tooodles.log`).\n"
-                      "• `debug` / `status` — Ficha técnica de conexiones, memoria RAM/disco, cache `/tmp` y RecSys.",
+                      "• `status` / `debug` — Ficha técnica de estado en tiempo real (salud de disco, modo WAL de SQLite, caché `/tmp` y RecSys).",
                 inline=False
             )
             embed.add_field(
