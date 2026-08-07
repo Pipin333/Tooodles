@@ -8,6 +8,9 @@ from rapidfuzz import process, fuzz
 
 from database import add_or_update_song
 from sznUtils import extract_info, RateLimitError, ForbiddenBlockError
+from sznLogger import get_logger
+
+logger = get_logger("music.player")
 
 async def prefetch_chunk_throttled(song_info: dict) -> str | None:
     """
@@ -50,12 +53,12 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
             ydl.download([url])
 
     try:
-        print(f"⚡ Iniciando descarga completa de audio en segundo plano: {song_info.get('title')}", flush=True)
+        logger.info(f"⚡ Iniciando descarga completa de audio en segundo plano: {song_info.get('title')}")
         await asyncio.to_thread(_download)
         if os.path.exists(temp_cache_path) and os.path.getsize(temp_cache_path) > 1024:
             os.replace(temp_cache_path, final_cache_path)
             song_info['cache_path'] = final_cache_path
-            print(f"⚡ Audio completo precargado en caché: {final_cache_path}", flush=True)
+            logger.info(f"⚡ Audio completo precargado en caché: {final_cache_path}")
             
             try:
                 from sznUtils import extract_local_audio_features
@@ -63,13 +66,13 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
                 feats = await asyncio.to_thread(extract_local_audio_features, final_cache_path)
                 if feats:
                     await asyncio.to_thread(update_song_audio_features, song_info.get('title'), feats)
-                    print(f"🎼 Métricas acústicas reales extraídas ({song_info.get('title')}): BPM={feats.get('tempo')}, Energy={feats.get('energy')}, Brightness={feats.get('valence')}", flush=True)
+                    logger.debug(f"🎼 Métricas acústicas reales extraídas ({song_info.get('title')}): BPM={feats.get('tempo')}, Energy={feats.get('energy')}, Brightness={feats.get('valence')}")
             except Exception as feat_err:
-                print(f"⚠️ Error al analizar métricas de audio: {feat_err}", flush=True)
+                logger.warning(f"⚠️ Error al analizar métricas de audio: {feat_err}")
 
             return final_cache_path
     except Exception as e:
-        print(f"⚠️ Precarga de audio completa falló: {e}", flush=True)
+        logger.warning(f"⚠️ Precarga de audio completa falló: {e}")
         if os.path.exists(temp_cache_path):
             try:
                 os.remove(temp_cache_path)
@@ -87,7 +90,7 @@ def cleanup_cache(song_info: dict | None = None):
             temp_path = os.path.join(temp_dir, f"cache_{song_info['id']}.tmp")
             if os.path.exists(cache_path):
                 os.remove(cache_path)
-                print(f"🧹 Cache completo eliminado: {cache_path}", flush=True)
+                logger.info(f"🧹 Cache completo eliminado: {cache_path}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         else:
@@ -99,7 +102,7 @@ def cleanup_cache(song_info: dict | None = None):
                     except Exception:
                         pass
     except Exception as e:
-        print(f"⚠️ Error durante cleanup de cache: {e}", flush=True)
+        logger.warning(f"⚠️ Error durante cleanup de cache: {e}")
 
 def cleanup_old_cache(max_age_seconds: int = 3600):
     """Elimina cualquier archivo .webm o .tmp en /tmp con más de max_age_seconds de antigüedad (por defecto 1 hora)."""
@@ -119,9 +122,9 @@ def cleanup_old_cache(max_age_seconds: int = 3600):
                     except Exception:
                         pass
         if removed_count > 0:
-            print(f"🧹 [CACHE DISK] Limpieza de disco: eliminados {removed_count} archivos de caché antiguos (>1h).", flush=True)
+            logger.info(f"🧹 [CACHE DISK] Limpieza de disco: eliminados {removed_count} archivos de caché antiguos (>1h).")
     except Exception as e:
-        print(f"⚠️ Error durante limpieza periódica de caché antiguo: {e}", flush=True)
+        logger.warning(f"⚠️ Error durante limpieza periódica de caché antiguo: {e}")
 
 def fuzzy_find_songs(query: str, song_list: list[dict], limit: int = 10) -> list[dict]:
     """Aplica fuzzy matching con rapidfuzz sobre una lista de canciones."""
@@ -235,7 +238,7 @@ class MusicPlayerMixin:
             return player.voice_client
 
         try:
-            print(f"🔊 Conectando al canal de voz: {target_channel.name} en {ctx.guild.name}...")
+            logger.info(f"🔊 Conectando al canal de voz: {target_channel.name} en {ctx.guild.name}...")
             player.voice_client = await target_channel.connect(timeout=15.0, reconnect=True)
             
             # Cargar el modo radio por defecto al conectar
@@ -245,10 +248,10 @@ class MusicPlayerMixin:
             
             # Restaurar cola persistente si está activada para este servidor
             persist_enabled = is_guild_persist_enabled(ctx.guild.id)
-            print(f"🔍 [JOIN] Guild {ctx.guild.id} — persist={persist_enabled}, song_queue_actual={len(player.song_queue)}", flush=True)
+            logger.debug(f"🔍 [JOIN] Guild {ctx.guild.id} — persist={persist_enabled}, song_queue_actual={len(player.song_queue)}")
             if persist_enabled and not player.song_queue:
                 restored = await asyncio.to_thread(load_guild_queue, ctx.guild.id)
-                print(f"🔍 [JOIN] load_guild_queue devolvió {len(restored)} canciones para guild {ctx.guild.id}", flush=True)
+                logger.debug(f"🔍 [JOIN] load_guild_queue devolvió {len(restored)} canciones para guild {ctx.guild.id}")
                 if restored:
                     player.song_queue.extend(restored)
                     await ctx.send(f"📥 **Cola recuperada**: Se restauraron **{len(restored)}** canciones pendientes tras el reinicio.")
@@ -256,11 +259,11 @@ class MusicPlayerMixin:
                     if not player.current_song and not (player.voice_client and player.voice_client.is_playing()):
                         self.bot.loop.create_task(self.play_next(ctx))
                 else:
-                    print(f"⚠️ [JOIN] No había cola guardada en BD para guild {ctx.guild.id}", flush=True)
+                    logger.warning(f"⚠️ [JOIN] No había cola guardada en BD para guild {ctx.guild.id}")
 
             return player.voice_client
         except Exception as e:
-            print(f"❌ Error de conexión al canal de voz: {e}")
+            logger.error(f"❌ Error de conexión al canal de voz: {e}")
             await ctx.send("❌ Error al conectar al canal de voz.")
             return None
 
@@ -293,7 +296,7 @@ class MusicPlayerMixin:
                         if cached_file:
                             s['cache_path'] = cached_file
             except Exception as e:
-                print(f"⚠️ Error en precarga diferida a los 30s: {e}", flush=True)
+                logger.warning(f"⚠️ Error en precarga diferida a los 30s: {e}")
             finally:
                 s['_is_optimizing'] = False
 
@@ -319,7 +322,7 @@ class MusicPlayerMixin:
         try:
             add_or_update_song(song_info['title'], song_info.get('id') or song_info['title'], duration=song_info.get('duration', 0))
         except Exception as e:
-            print(f"⚠️ No se pudo guardar la canción en BD: {e}")
+            logger.warning(f"⚠️ No se pudo guardar la canción en BD: {e}")
 
         vc = player.voice_client
         is_busy = vc and (vc.is_playing() or vc.is_paused())
@@ -339,15 +342,15 @@ class MusicPlayerMixin:
             info = await extract_info(query)
             await self.add_song_dict(ctx, info, origin, notify=notify)
         except RateLimitError as e:
-            print(f"🚫 [RATE LIMIT] YouTube HTTP 429 ({query}): {e}", flush=True)
+            logger.error(f"🚫 [RATE LIMIT] YouTube HTTP 429 ({query}): {e}")
             if notify and ctx:
                 await ctx.send("🚫 **Alerta de Extracción (HTTP 429)**: YouTube ha limitado las peticiones de la IP por exceso de tráfico.")
         except ForbiddenBlockError as e:
-            print(f"🚫 [BOT BLOCK / 403] YouTube HTTP 403 ({query}): {e}", flush=True)
+            logger.error(f"🚫 [BOT BLOCK / 403] YouTube HTTP 403 ({query}): {e}")
             if notify and ctx:
                 await ctx.send("🚫 **Alerta de Extracción (HTTP 403 / Bot Block)**: YouTube rechazó la solicitud por sospecha de bot.")
         except Exception as e:
-            print(f"❌ Error interno en la búsqueda/extracción ({query}): {e}", flush=True)
+            logger.error(f"❌ Error interno en la búsqueda/extracción ({query}): {e}")
             if notify and ctx:
                 await ctx.send("❌ No se pudo procesar o encontrar la canción solicitada.")
         finally:
@@ -365,7 +368,7 @@ class MusicPlayerMixin:
                 track = await asyncio.to_thread(self.sp.track, track_id)
                 query = f"{track['name']} {track['artists'][0]['name']}"
             except Exception as e:
-                print(f"⚠️ Error al obtener track de Spotify API: {e}", flush=True)
+                logger.warning(f"⚠️ Error al obtener track de Spotify API: {e}")
 
         if not query and track_id:
             try:
@@ -380,7 +383,7 @@ class MusicPlayerMixin:
                             if title:
                                 query = f"{title} {artist}".strip()
             except Exception as e:
-                print(f"⚠️ Error en oEmbed de Spotify: {e}", flush=True)
+                logger.warning(f"⚠️ Error en oEmbed de Spotify: {e}")
 
         if query:
             await self.add_from_youtube(ctx, query, origin=f"🎵 Spotify por {ctx.author.name}")
@@ -441,7 +444,7 @@ class MusicPlayerMixin:
             self.schedule_queue_optimizations(ctx)
 
         except Exception as e:
-            print(f"❌ Error al procesar playlist de Spotify: {e}", flush=True)
+            logger.error(f"❌ Error al procesar playlist de Spotify: {e}")
             await ctx.send("❌ Error al cargar la playlist de Spotify.")
 
     async def add_album_from_spotify(self, ctx, url, album_id=None):
@@ -492,7 +495,7 @@ class MusicPlayerMixin:
             self.schedule_queue_optimizations(ctx)
 
         except Exception as e:
-            print(f"❌ Error al procesar álbum de Spotify: {e}", flush=True)
+            logger.error(f"❌ Error al procesar álbum de Spotify: {e}")
             await ctx.send("❌ Error al cargar el álbum de Spotify.")
 
     async def add_artist_from_spotify(self, ctx, url, artist_id=None):
@@ -542,7 +545,7 @@ class MusicPlayerMixin:
             self.schedule_queue_optimizations(ctx)
 
         except Exception as e:
-            print(f"❌ Error al procesar artista de Spotify: {e}", flush=True)
+            logger.error(f"❌ Error al procesar artista de Spotify: {e}")
             await ctx.send("❌ Error al cargar canciones del artista de Spotify.")
 
     async def add_playlist_from_youtube(self, ctx, url):
@@ -583,7 +586,7 @@ class MusicPlayerMixin:
             self.schedule_queue_optimizations(ctx)
 
         except Exception as e:
-            print(f"❌ Error al procesar playlist de YouTube: {e}", flush=True)
+            logger.error(f"❌ Error al procesar playlist de YouTube: {e}")
             await ctx.send("❌ Error al cargar la playlist de YouTube.")
 
     async def play_next(self, ctx):
@@ -636,17 +639,17 @@ class MusicPlayerMixin:
                     else:
                         raise RuntimeError("Failed to resolve audio stream URL.")
                 except RateLimitError as e:
-                    print(f"🚫 [RATE LIMIT] Error al resolver tema de cola ({player.current_song.get('title')}): {e}", flush=True)
+                    logger.error(f"🚫 [RATE LIMIT] Error al resolver tema de cola ({player.current_song.get('title')}): {e}")
                     player.current_song = None
                     self.bot.loop.create_task(self.play_next(ctx))
                     return
                 except ForbiddenBlockError as e:
-                    print(f"🚫 [BOT BLOCK] Error al resolver tema de cola ({player.current_song.get('title')}): {e}", flush=True)
+                    logger.error(f"🚫 [BOT BLOCK] Error al resolver tema de cola ({player.current_song.get('title')}): {e}")
                     player.current_song = None
                     self.bot.loop.create_task(self.play_next(ctx))
                     return
                 except Exception as e:
-                    print(f"⚠️ Error al resolver tema de cola ({player.current_song.get('title')}): {e}", flush=True)
+                    logger.warning(f"⚠️ Error al resolver tema de cola ({player.current_song.get('title')}): {e}")
                     player.current_song = None
                     self.bot.loop.create_task(self.play_next(ctx))
                     return
@@ -668,7 +671,7 @@ class MusicPlayerMixin:
 
             def after_playing(error):
                 if error:
-                    print(f"⚠️ Error en reproducción de FFmpeg: {error}", flush=True)
+                    logger.warning(f"⚠️ Error en reproducción de FFmpeg: {error}")
 
                 asyncio.run_coroutine_threadsafe(self._process_after_playing(ctx, player.current_song, getattr(player, 'current_song_start_time', None), getattr(player, 'current_song_skipped', False)), self.bot.loop)
 
@@ -678,13 +681,13 @@ class MusicPlayerMixin:
                 audio_source = discord.FFmpegPCMAudio(target_path, before_options=before_opts, options=ffmpeg_options)
                 if player.voice_client and player.voice_client.is_connected():
                     if player.voice_client.is_playing():
-                        print("⚠️ Voice client ya estaba reproduciendo audio. Cancelando reproducción duplicada.", flush=True)
+                        logger.warning("⚠️ Voice client ya estaba reproduciendo audio. Cancelando reproducción duplicada.")
                         return
                     player.voice_client.play(audio_source, after=after_playing)
                 else:
                     await ctx.send("⚠️ El bot fue desconectado del canal de voz.")
             except Exception as e:
-                print(f"❌ Error al iniciar FFmpeg: {e}", flush=True)
+                logger.error(f"❌ Error al iniciar FFmpeg: {e}")
                 player.current_song = None
 
     async def _process_after_playing(self, ctx, current_song, start_time, skipped):
@@ -708,7 +711,7 @@ class MusicPlayerMixin:
                     skipped_at=listened_duration if skipped else None
                 )
             except Exception as db_err:
-                print(f"⚠️ Error al registrar telemetría de reproducción: {db_err}", flush=True)
+                logger.warning(f"⚠️ Error al registrar telemetría de reproducción: {db_err}")
 
         if current_song and current_song.get('title'):
             player.last_played_title = current_song['title']

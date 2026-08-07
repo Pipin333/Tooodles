@@ -4,6 +4,9 @@ from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, DateTime, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sznLogger import get_logger
+
+logger = get_logger("database")
 
 # URL de la base de datos desde las variables de entorno (Railway / local fallback)
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -148,11 +151,11 @@ def setup_database():
         for col_name, col_type in audio_cols:
             try:
                 conn.execute(text(f"ALTER TABLE songs ADD COLUMN {col_name} {col_type}"))
-                print(f"🗄️ Columna '{col_name}' agregada exitosamente a 'songs'.")
+                logger.info(f"🗄️ Columna '{col_name}' agregada exitosamente a 'songs'.")
             except Exception:
                 pass  # La columna ya existe
             
-    print("🗄️ Tablas de base de datos creadas/verificadas correctamente.")
+    logger.info("🗄️ Tablas de base de datos creadas/verificadas correctamente.")
 
 def add_or_update_song(title, url=None, artist=None, duration=0):
     """Agrega una canción nueva si no existe o retorna la existente."""
@@ -233,9 +236,9 @@ def preload_top_songs_cache(limit=10):
     try:
         top_songs = get_top_songs(limit=limit)
         cached_songs = {title: count for title, count in top_songs if title}
-        print("🎶 Top de canciones precargado en caché.")
+        logger.info("🎶 Top de canciones precargado en caché.")
     except Exception as e:
-        print(f"⚠️ No se pudo precargar la caché de canciones: {e}")
+        logger.warning(f"⚠️ No se pudo precargar la caché de canciones: {e}")
 
 def log_play_event(title, artist, duration, user_id, username, guild_id, listened_duration, completed, skipped_at=None):
     """Registra un evento de reproducción y actualiza estadísticas."""
@@ -261,7 +264,7 @@ def log_play_event(title, artist, duration, user_id, username, guild_id, listene
             skipped_at=skipped_at
         )
         session.add(log_entry)
-        print(f"📊 [DATABASE] Telemetría registrada para '{title}' por @{username}. (Completada: {completed})", flush=True)
+        logger.info(f"📊 [DATABASE] Telemetría registrada para '{title}' por @{username}. (Completada: {completed})")
 
 def update_song_features(title, spotify_id=None, genres=None, popularity=None):
     """Actualiza los metadatos de recomendación de una canción existente."""

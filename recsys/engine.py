@@ -79,8 +79,8 @@ class RecSysEngine:
             True si se cargó/recargó exitosamente, False si no hay artefactos.
         """
         if not os.path.exists(ARTIFACTS_PATH):
-            print("⚠️ [RecSys] No se encontraron artefactos entrenados en "
-                  f"{ARTIFACTS_PATH}. Ejecuta 'python -m recsys.train' primero.")
+            logger.warning("⚠️ [RecSys] No se encontraron artefactos entrenados en "
+                           f"{ARTIFACTS_PATH}. Ejecuta 'python -m recsys.train' primero.")
             return False
         
         # Verificar si el archivo cambió desde la última carga
@@ -163,12 +163,12 @@ class RecSysEngine:
             elapsed = (time.time() - t0) * 1000
             n_users = len(self.user_id_map)
             n_songs = len(self.song_id_map)
-            print(f"✅ [RecSys] Artefactos cargados en {elapsed:.0f}ms "
-                  f"({n_users} usuarios, {n_songs} canciones)")
+            logger.info(f"✅ [RecSys] Artefactos cargados en {elapsed:.0f}ms "
+                        f"({n_users} usuarios, {n_songs} canciones)")
             return True
             
         except Exception as e:
-            print(f"❌ [RecSys] Error al cargar artefactos: {e}")
+            logger.error(f"❌ [RecSys] Error al cargar artefactos: {e}")
             return False
     
     def reload_if_updated(self) -> bool:
@@ -177,7 +177,7 @@ class RecSysEngine:
             return False
         file_mtime = os.path.getmtime(ARTIFACTS_PATH)
         if file_mtime != self._last_file_mtime:
-            print("🔄 [RecSys] Detectado cambio en artefactos, recargando...")
+            logger.info("🔄 [RecSys] Detectado cambio en artefactos, recargando...")
             return self.load(force=True)
         return self.loaded
     

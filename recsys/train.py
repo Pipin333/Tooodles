@@ -87,7 +87,7 @@ def build_interaction_matrix(play_logs, likes, dislikes, songs):
         all_song_ids.add(dislike['song_id'])
     
     if not all_user_ids or not all_song_ids:
-        print("⚠️ No hay suficientes datos para construir la matriz de interacción.")
+        logger.warning("⚠️ No hay suficientes datos para construir la matriz de interacción.")
         return None, {}, {}, {}, {}
     
     user_id_map = {uid: idx for idx, uid in enumerate(sorted(all_user_ids))}
@@ -160,8 +160,8 @@ def build_interaction_matrix(play_logs, likes, dislikes, songs):
         shape=(n_users, n_songs)
     )
     
-    print(f"📊 Matriz de interacción construida: {n_users} usuarios × {n_songs} canciones "
-          f"({len(scores)} interacciones no-cero)")
+    logger.info(f"📊 Matriz de interacción construida: {n_users} usuarios × {n_songs} canciones "
+                f"({len(scores)} interacciones no-cero)")
     
     return interaction_matrix, user_id_map, song_id_map, reverse_song_map, reverse_user_map
 
@@ -191,7 +191,7 @@ def train_als_model(interaction_matrix):
     positive_matrix.eliminate_zeros()
     
     if positive_matrix.nnz == 0:
-        print("⚠️ No hay interacciones positivas para entrenar ALS.")
+        logger.warning("⚠️ No hay interacciones positivas para entrenar ALS.")
         return None, None
     
     model = AlternatingLeastSquares(
@@ -205,8 +205,8 @@ def train_als_model(interaction_matrix):
     # implicit 0.6+ espera matriz user-item CSR (n_users x n_songs)
     user_items = positive_matrix.tocsr()
     
-    print(f"🧠 Entrenando Implicit ALS (factors={ALS_FACTORS}, "
-          f"iterations={ALS_ITERATIONS})...")
+    logger.info(f"🧠 Entrenando Implicit ALS (factors={ALS_FACTORS}, "
+                f"iterations={ALS_ITERATIONS})...")
     t0 = time.time()
     try:
         from threadpoolctl import threadpool_limits
@@ -215,14 +215,14 @@ def train_als_model(interaction_matrix):
     except ImportError:
         model.fit(user_items)
     elapsed = time.time() - t0
-    print(f"✅ ALS entrenado en {elapsed:.1f}s")
+    logger.info(f"✅ ALS entrenado en {elapsed:.1f}s")
     
     # Extraer factores como arrays numpy
     user_factors = np.array(model.user_factors)
     item_factors = np.array(model.item_factors)
     
-    print(f"   → User factors shape: {user_factors.shape}")
-    print(f"   → Item factors shape: {item_factors.shape}")
+    logger.info(f"   → User factors shape: {user_factors.shape}")
+    logger.info(f"   → Item factors shape: {item_factors.shape}")
     
     return user_factors, item_factors
 
@@ -242,14 +242,14 @@ def train_item2vec(session_sequences, song_id_map):
     from gensim.models import Word2Vec
     
     if not session_sequences:
-        print("⚠️ No hay secuencias de sesión para entrenar Item2Vec.")
+        logger.warning("⚠️ No hay secuencias de sesión para entrenar Item2Vec.")
         return None
     
     # Convertir song_ids a strings (Word2Vec trabaja con tokens string)
     sentences = [[str(sid) for sid in seq] for seq in session_sequences]
     
-    print(f"🧠 Entrenando Item2Vec (dim={ITEM2VEC_DIM}, "
-          f"window={ITEM2VEC_WINDOW}, {len(sentences)} sesiones)...")
+    logger.info(f"🧠 Entrenando Item2Vec (dim={ITEM2VEC_DIM}, "
+                f"window={ITEM2VEC_WINDOW}, {len(sentences)} sesiones)...")
     t0 = time.time()
     
     model = Word2Vec(
@@ -264,7 +264,7 @@ def train_item2vec(session_sequences, song_id_map):
     )
     
     elapsed = time.time() - t0
-    print(f"✅ Item2Vec entrenado en {elapsed:.1f}s ({len(model.wv)} canciones en vocabulario)")
+    logger.info(f"✅ Item2Vec entrenado en {elapsed:.1f}s ({len(model.wv)} canciones en vocabulario)")
     
     # Construir matriz de embeddings alineada con song_id_map
     n_songs = len(song_id_map)
@@ -277,7 +277,7 @@ def train_item2vec(session_sequences, song_id_map):
             item2vec_vectors[idx] = model.wv[token]
             mapped_count += 1
     
-    print(f"   → {mapped_count}/{n_songs} canciones mapeadas a vectores Item2Vec")
+    logger.info(f"   → {mapped_count}/{n_songs} canciones mapeadas a vectores Item2Vec")
     
     return item2vec_vectors
 
@@ -296,10 +296,10 @@ def fetch_spotify_audio_features(songs_metadata):
     missing_sp_ids = [s.get('spotify_id') for s in songs_metadata if s.get('spotify_id') and s.get('danceability') is None]
 
     if not missing_sp_ids:
-        print("✅ Catálogo sincronizado con metadatos acústicos en BD.")
+        logger.info("✅ Catálogo sincronizado con metadatos acústicos en BD.")
         return
 
-    print(f"🎵 Sincronizando metadatos de Spotify para {len(missing_sp_ids)} canciones...")
+    logger.info(f"🎵 Sincronizando metadatos de Spotify para {len(missing_sp_ids)} canciones...")
     try:
         sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=cid, client_secret=secret))
         
@@ -326,9 +326,9 @@ def fetch_spotify_audio_features(songs_metadata):
             except Exception:
                 pass
                 
-        print("✅ Metadatos de Spotify procesados.")
+        logger.info("✅ Metadatos de Spotify procesados.")
     except Exception as e:
-        print(f"ℹ️ Sincronización de Spotify finalizada ({e})")
+        logger.info(f"ℹ️ Sincronización de Spotify finalizada ({e})")
 
 
 def build_audio_feature_matrix(songs_metadata, song_id_map):
@@ -422,19 +422,19 @@ def export_artifacts(user_factors, item_factors, item2vec_vectors, audio_feature
     
     np.savez_compressed(ARTIFACTS_PATH, **save_dict)
     file_size = os.path.getsize(ARTIFACTS_PATH) / (1024 * 1024)
-    print(f"💾 Artefactos exportados a {ARTIFACTS_PATH} ({file_size:.2f} MB)")
+    logger.info(f"💾 Artefactos exportados a {ARTIFACTS_PATH} ({file_size:.2f} MB)")
 
 
 def main():
     """Pipeline principal de entrenamiento del RecSys."""
-    print("=" * 60)
-    print("🚀 Toodles RecSys — Entrenamiento Offline (Híbrido Multimodal)")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("🚀 Toodles RecSys — Entrenamiento Offline (Híbrido Multimodal)")
+    logger.info("=" * 60)
     
     total_start = time.time()
     
     # ─── Paso 1: Extraer datos ──────────────────────────────────────
-    print("\n📥 Paso 1: Extrayendo datos de la base de datos...")
+    logger.info("\n📥 Paso 1: Extrayendo datos de la base de datos...")
     from database import get_recsys_data, get_session_sequences
     
     data = get_recsys_data()
@@ -443,14 +443,14 @@ def main():
     dislikes = data['dislikes']
     songs = data['songs']
     
-    print(f"   → {len(play_logs)} eventos de reproducción")
-    print(f"   → {len(likes)} likes")
-    print(f"   → {len(dislikes)} dislikes")
-    print(f"   → {len(songs)} canciones en catálogo")
+    logger.info(f"   → {len(play_logs)} eventos de reproducción")
+    logger.info(f"   → {len(likes)} likes")
+    logger.info(f"   → {len(dislikes)} dislikes")
+    logger.info(f"   → {len(songs)} canciones en catálogo")
     
     if len(play_logs) < 5 and len(likes) < 3:
-        print("\n⚠️ Datos insuficientes para entrenamiento (< 5 reproducciones y < 3 likes).")
-        print("   El bot usará recomendaciones basadas en Spotify como fallback.")
+        logger.warning("\n⚠️ Datos insuficientes para entrenamiento (< 5 reproducciones y < 3 likes).")
+        logger.info("   El bot usará recomendaciones basadas en Spotify como fallback.")
         return
     
     # ─── Paso 2: Audio Features de Spotify ─────────────────────────
@@ -460,38 +460,38 @@ def main():
     songs = data['songs']
 
     # ─── Paso 3: Construir matriz de interacción ────────────────────
-    print("\n📊 Paso 3: Construyendo matriz de interacción R(u,i)...")
+    logger.info("\n📊 Paso 3: Construyendo matriz de interacción R(u,i)...")
     result = build_interaction_matrix(play_logs, likes, dislikes, songs)
     interaction_matrix, user_id_map, song_id_map, reverse_song_map, reverse_user_map = result
     
     if interaction_matrix is None:
-        print("❌ No se pudo construir la matriz. Abortando.")
+        logger.error("❌ No se pudo construir la matriz. Abortando.")
         return
     
     # ─── Paso 4: Entrenar ALS ────────────────────────────────────────
-    print("\n🧠 Paso 4: Entrenando modelo Implicit ALS...")
+    logger.info("\n🧠 Paso 4: Entrenando modelo Implicit ALS...")
     user_factors, item_factors = train_als_model(interaction_matrix)
     
     # ─── Paso 5: Extraer secuencias de sesión y entrenar Item2Vec ──
-    print("\n🎵 Paso 5: Extrayendo secuencias de sesión...")
+    logger.info("\n🎵 Paso 5: Extrayendo secuencias de sesión...")
     session_sequences = get_session_sequences()
-    print(f"   → {len(session_sequences)} sesiones extraídas")
+    logger.info(f"   → {len(session_sequences)} sesiones extraídas")
     
     if session_sequences:
         total_tracks = sum(len(s) for s in session_sequences)
         avg_len = total_tracks / len(session_sequences)
-        print(f"   → {total_tracks} tracks totales (promedio {avg_len:.1f} tracks/sesión)")
+        logger.info(f"   → {total_tracks} tracks totales (promedio {avg_len:.1f} tracks/sesión)")
     
-    print("\n🧠 Paso 6: Entrenando Item2Vec...")
+    logger.info("\n🧠 Paso 6: Entrenando Item2Vec...")
     item2vec_vectors = train_item2vec(session_sequences, song_id_map)
     
     # ─── Paso 7: Matriz de Audio Features ───────────────────────────
-    print("\n🎼 Paso 7: Construyendo matriz de Audio Features (Danceability, Energy, Valence, Tempo)...")
+    logger.info("\n🎼 Paso 7: Construyendo matriz de Audio Features (Danceability, Energy, Valence, Tempo)...")
     audio_feature_vectors = build_audio_feature_matrix(songs, song_id_map)
-    print(f"   → {audio_feature_vectors.shape[0]} canciones x {audio_feature_vectors.shape[1]} características acústicas")
+    logger.info(f"   → {audio_feature_vectors.shape[0]} canciones x {audio_feature_vectors.shape[1]} características acústicas")
 
     # ─── Paso 8: Exportar artefactos ─────────────────────────────────
-    print("\n💾 Paso 8: Exportando artefactos...")
+    logger.info("\n💾 Paso 8: Exportando artefactos...")
     export_artifacts(
         user_factors=user_factors,
         item_factors=item_factors,
@@ -506,9 +506,9 @@ def main():
     )
     
     total_elapsed = time.time() - total_start
-    print(f"\n{'=' * 60}")
-    print(f"✅ Entrenamiento completado en {total_elapsed:.1f}s")
-    print(f"{'=' * 60}")
+    logger.info(f"\n{'=' * 60}")
+    logger.info(f"✅ Entrenamiento completado en {total_elapsed:.1f}s")
+    logger.info(f"{'=' * 60}")
 
 
 if __name__ == "__main__":

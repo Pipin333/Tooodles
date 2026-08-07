@@ -2,6 +2,9 @@
 import discord
 from discord.ext import commands
 from discord.ui import View, Button, Modal, TextInput
+from sznLogger import get_logger
+
+logger = get_logger("ui")
 
 class PrefixModal(Modal, title="Configurar Prefijo del Bot"):
     prefix_input = TextInput(
@@ -188,7 +191,7 @@ class MusicUI(commands.Cog):
         try:
             await ctx.send(embed=embed, view=view, delete_after=300)
         except Exception as e:
-            print(f"⚠️ Error al enviar notificación de reproducción: {e}", flush=True)
+            logger.warning(f"⚠️ Error al enviar notificación de reproducción: {e}")
 
     @commands.command(name="controls", aliases=["ctr", "player"])
     async def controls(self, ctx):
@@ -250,7 +253,7 @@ class MusicUI(commands.Cog):
                     await owner.send(embed=embed, view=view)
                     await ctx.send("📩 **Solicitud enviada**: Se envió un mensaje al dueño del bot para solicitar autorización. Te notificaremos cuando responda.")
                 except Exception as e:
-                    print(f"⚠️ Error al enviar solicitud por DM al dueño: {e}", flush=True)
+                    logger.warning(f"⚠️ Error al enviar solicitud por DM al dueño: {e}")
                     await ctx.send("⚠️ No se pudo enviar el mensaje privado al dueño del bot. Por favor intenta más tarde.")
 
         elif mode in ("off", "desactivar", "desactivado", "false", "0"):
@@ -313,7 +316,45 @@ class MusicUI(commands.Cog):
             else:
                 await interaction.response.send_message("🎵 La cola está vacía.", ephemeral=True)
 
-        @discord.ui.button(label="❤️ Like", style=discord.ButtonStyle.secondary, custom_id="like_song", row=0)
+        @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id="shuffle_queue", row=0)
+        async def shuffle_queue(self, interaction: discord.Interaction, button: Button):
+            player = self.get_player()
+            if not player.song_queue:
+                await interaction.response.send_message("⚠️ La cola está vacía, no hay nada que mezclar.", ephemeral=True)
+                return
+            import random
+            random.shuffle(player.song_queue)
+            await interaction.response.send_message(f"🔀 Cola mezclada aleatoriamente ({len(player.song_queue)} canciones).", ephemeral=True)
+
+        @discord.ui.button(label="📋 Cola", style=discord.ButtonStyle.secondary, custom_id="show_queue", row=0)
+        async def show_queue(self, interaction: discord.Interaction, button: Button):
+            player = self.get_player()
+            if not player.current_song and not player.song_queue:
+                await interaction.response.send_message("📭 La cola está vacía.", ephemeral=True)
+                return
+
+            lines = []
+            if player.current_song:
+                title = player.current_song.get('title', '?')
+                dur = self.core.format_duration(player.current_song.get('duration', 0))
+                lines.append(f"▶️ **{title}** `[{dur}]`")
+
+            for i, s in enumerate(player.song_queue[:10], 1):
+                dur = self.core.format_duration(s.get('duration', 0))
+                lines.append(f"`{i:02d}.` **{s['title']}** `[{dur}]`")
+
+            if len(player.song_queue) > 10:
+                lines.append(f"*...y {len(player.song_queue) - 10} más.*")
+
+            embed = discord.Embed(
+                title="📋 Cola de Reproducción",
+                description="\n".join(lines),
+                color=0x7d5fff
+            )
+            embed.set_footer(text=f"{len(player.song_queue)} canciones en cola")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @discord.ui.button(label="❤️ Like", style=discord.ButtonStyle.secondary, custom_id="like_song", row=1)
         async def like_song_button(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if not player.current_song or not player.current_song.get('title'):
@@ -337,7 +378,7 @@ class MusicUI(commands.Cog):
                 else:
                     await interaction.response.send_message(f"❤️ Registrado me gusta para: **{song_title}**", ephemeral=True)
 
-        @discord.ui.button(label="👎 Dislike", style=discord.ButtonStyle.secondary, custom_id="dislike_song", row=0)
+        @discord.ui.button(label="👎 Dislike", style=discord.ButtonStyle.secondary, custom_id="dislike_song", row=1)
         async def dislike_song_button(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if not player.current_song or not player.current_song.get('title'):
@@ -372,45 +413,7 @@ class MusicUI(commands.Cog):
                     
             await interaction.followup.send(f"🤖 Autoplay ML **{status}**.", ephemeral=True)
 
-        @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id="shuffle_queue", row=1)
-        async def shuffle_queue(self, interaction: discord.Interaction, button: Button):
-            player = self.get_player()
-            if not player.song_queue:
-                await interaction.response.send_message("⚠️ La cola está vacía, no hay nada que mezclar.", ephemeral=True)
-                return
-            import random
-            random.shuffle(player.song_queue)
-            await interaction.response.send_message(f"🔀 Cola mezclada aleatoriamente ({len(player.song_queue)} canciones).", ephemeral=True)
-
-        @discord.ui.button(label="📋 Cola", style=discord.ButtonStyle.secondary, custom_id="show_queue", row=1)
-        async def show_queue(self, interaction: discord.Interaction, button: Button):
-            player = self.get_player()
-            if not player.current_song and not player.song_queue:
-                await interaction.response.send_message("📭 La cola está vacía.", ephemeral=True)
-                return
-
-            lines = []
-            if player.current_song:
-                title = player.current_song.get('title', '?')
-                dur = self.core.format_duration(player.current_song.get('duration', 0))
-                lines.append(f"▶️ **{title}** `[{dur}]`")
-
-            for i, s in enumerate(player.song_queue[:10], 1):
-                dur = self.core.format_duration(s.get('duration', 0))
-                lines.append(f"`{i:02d}.` **{s['title']}** `[{dur}]`")
-
-            if len(player.song_queue) > 10:
-                lines.append(f"*...y {len(player.song_queue) - 10} más.*")
-
-            embed = discord.Embed(
-                title="📋 Cola de Reproducción",
-                description="\n".join(lines),
-                color=0x7d5fff
-            )
-            embed.set_footer(text=f"{len(player.song_queue)} canciones en cola")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop", row=2)
+        @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop", row=1)
         async def stop(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if player.voice_client:
@@ -1154,9 +1157,9 @@ class PlaylistSelect(discord.ui.Select):
                 ctx.author = interaction.user
                 await music_cog.play(ctx, query=selected_url)
             else:
-                print("⚠️ [PLAYLIST SELECT] MusicCore cog no encontrado.", flush=True)
+                logger.warning("⚠️ [PLAYLIST SELECT] MusicCore cog no encontrado.")
         except Exception as e:
-            print(f"❌ [PLAYLIST SELECT ERROR] {e}", flush=True)
+            logger.error(f"❌ [PLAYLIST SELECT ERROR] {e}")
 
 
 class EditPlaylistModal(Modal, title="✏️ Editar Playlist Guardada"):

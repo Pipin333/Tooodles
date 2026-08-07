@@ -19,6 +19,9 @@ from .player import (
     MusicPlayerMixin
 )
 from .radio import MusicRadioMixin, GENRE_EXPANSION
+from sznLogger import get_logger
+
+logger = get_logger("music")
 
 SPOTIFY_CLIENT_ID = os.getenv('client_id')
 SPOTIFY_CLIENT_SECRET = os.getenv('client_secret')
@@ -31,17 +34,17 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
 
         try:
             if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-                print("🔁 Conectando con Spotify API...")
+                logger.info("🔁 Conectando con Spotify API...")
                 self.sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
                     client_id=SPOTIFY_CLIENT_ID,
                     client_secret=SPOTIFY_CLIENT_SECRET
                 ))
-                print("✅ Conexión a Spotify establecida.")
+                logger.info("✅ Conexión a Spotify establecida.")
             else:
-                print("ℹ️ Credenciales de Spotify no encontradas (client_id / client_secret). Búsquedas limitadas a YouTube.")
+                logger.info("ℹ️ Credenciales de Spotify no encontradas (client_id / client_secret). Búsquedas limitadas a YouTube.")
                 self.sp = None
         except Exception as e:
-            print(f"❌ Error al conectar con Spotify: {e}")
+            logger.error(f"❌ Error al conectar con Spotify: {e}")
             self.sp = None
 
         # Inicializar motor de recomendación ML
@@ -49,22 +52,22 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
         try:
             self.recsys_engine.load()
         except Exception as e:
-            print(f"ℹ️ [RecSys] Motor de recomendación no disponible: {e}")
+            logger.info(f"ℹ️ [RecSys] Motor de recomendación no disponible: {e}")
 
         try:
             self.inactivity_check.start()
         except Exception as e:
-            print(f"❌ Error al iniciar inactivity_check: {e}")
+            logger.error(f"❌ Error al iniciar inactivity_check: {e}")
 
         try:
             self.cache_cleanup_loop.start()
         except Exception as e:
-            print(f"❌ Error al iniciar cache_cleanup_loop: {e}")
+            logger.error(f"❌ Error al iniciar cache_cleanup_loop: {e}")
 
         try:
             self.recsys_training_loop.start()
         except Exception as e:
-            print(f"⚠️ [RecSys] Error al iniciar loop de entrenamiento: {e}")
+            logger.warning(f"⚠️ [RecSys] Error al iniciar loop de entrenamiento: {e}")
 
     @commands.command(name="join", aliases=["connect", "conectar", "unir", "j"])
     async def join(self, ctx):
@@ -292,10 +295,10 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
             info = await extract_info(query)
             await self.add_song_dict(ctx, info, origin=f"🔍 Búsqueda por {ctx.author.name}")
         except RateLimitError as e:
-            print(f"🚫 [RATE LIMIT] {e}", flush=True)
+            logger.error(f"🚫 [RATE LIMIT] {e}")
             await ctx.send("🚫 **Alerta de Extracción (HTTP 429)**: YouTube ha limitado las peticiones de la IP por exceso de tráfico.")
         except ForbiddenBlockError as e:
-            print(f"🚫 [BOT BLOCK] {e}", flush=True)
+            logger.error(f"🚫 [BOT BLOCK] {e}")
             await ctx.send("🚫 **Alerta de Extracción (HTTP 403 / Bot Block)**: YouTube rechazó la petición de búsqueda por detección de bot.")
         except Exception as e:
             await ctx.send(f"❌ No se encontraron resultados para: '{query}'")
@@ -306,19 +309,19 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
         try:
             await asyncio.to_thread(cleanup_old_cache, max_age_seconds=3600)
         except Exception as e:
-            print(f"⚠️ Error en limpieza automática de caché antiguo: {e}", flush=True)
+            logger.warning(f"⚠️ Error en limpieza automática de caché antiguo: {e}")
 
     @tasks.loop(hours=6)
     async def recsys_training_loop(self):
         """Entrena el modelo de recomendación automáticamente cada 6 horas."""
         try:
-            print("🔄 [RecSys] Iniciando entrenamiento automático...", flush=True)
+            logger.info("🔄 [RecSys] Iniciando entrenamiento automático...")
             from recsys.train import main as train_recsys
             await asyncio.to_thread(train_recsys)
             self.recsys_engine.load(force=True)
-            print("✅ [RecSys] Entrenamiento completado y motor recargado.", flush=True)
+            logger.info("✅ [RecSys] Entrenamiento completado y motor recargado.")
         except Exception as e:
-            print(f"⚠️ [RecSys] Error en entrenamiento automático: {e}", flush=True)
+            logger.warning(f"⚠️ [RecSys] Error en entrenamiento automático: {e}")
 
     @recsys_training_loop.before_loop
     async def before_recsys_training(self):
@@ -339,7 +342,7 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                 player.current_song = None
                 player.radio_mode = False
                 cleanup_cache()
-                print(f"✅ Desconectado por inactividad en guild {guild_id}.", flush=True)
+                logger.info(f"✅ Desconectado por inactividad en guild {guild_id}.")
                 if player.last_ctx:
                     try:
                         await player.last_ctx.send("💤 Me he desconectado del canal de voz por inactividad (cola vacía durante 60 segundos).")
@@ -582,7 +585,7 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
             ))
 
         except Exception as e:
-            print(f"❌ Error en preload: {e}", flush=True)
+            logger.error(f"❌ Error en preload: {e}")
             await msg.edit(content=f"❌ Error durante la precarga: {e}")
 
 

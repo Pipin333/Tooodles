@@ -2,6 +2,9 @@ import asyncio
 import discord
 from discord.ext import commands
 from rapidfuzz import process
+from sznLogger import get_logger
+
+logger = get_logger("db")
 from database import (
     get_top_songs,
     get_recent_history,
@@ -37,7 +40,7 @@ class MusicDB(commands.Cog):
                     new_song = Song(title=title, played_count=1)
                     session.add(new_song)
         except Exception as e:
-            print(f"⚠️ Error al registrar reproducción de canción: {e}")
+            logger.warning(f"⚠️ Error al registrar reproducción de canción: {e}")
 
     def find_similar_song(self, query, threshold=90):
         try:
@@ -50,7 +53,7 @@ class MusicDB(commands.Cog):
                 if match and match[1] >= threshold:
                     return choices[match[0]]
         except Exception as e:
-            print(f"⚠️ Error en búsqueda difusa de canciones: {e}")
+            logger.warning(f"⚠️ Error en búsqueda difusa de canciones: {e}")
         return None
 
     def get_liked_songs_by_user(self, user_id):
@@ -62,7 +65,7 @@ class MusicDB(commands.Cog):
                 song_ids = [like.song_id for like in likes]
                 return session.query(Song).filter(Song.id.in_(song_ids)).all()
         except Exception as e:
-            print(f"⚠️ Error al obtener canciones favoritas: {e}")
+            logger.warning(f"⚠️ Error al obtener canciones favoritas: {e}")
             return []
 
     def get_liked_songs_by_users(self, user_ids):
@@ -75,7 +78,7 @@ class MusicDB(commands.Cog):
                 song_ids = {like.song_id for like in likes}
                 return session.query(Song).filter(Song.id.in_(song_ids)).all()
         except Exception as e:
-            print(f"⚠️ Error al obtener canciones favoritas del grupo: {e}")
+            logger.warning(f"⚠️ Error al obtener canciones favoritas del grupo: {e}")
             return []
 
     def like_song(self, user_id, song_title):
@@ -91,7 +94,7 @@ class MusicDB(commands.Cog):
                     return True
                 return False
         except Exception as e:
-            print(f"⚠️ Error al dar me gusta: {e}")
+            logger.warning(f"⚠️ Error al dar me gusta: {e}")
             return False
 
     def unlike_song(self, user_id, song_title):
@@ -106,7 +109,7 @@ class MusicDB(commands.Cog):
                     return True
                 return False
         except Exception as e:
-            print(f"⚠️ Error al eliminar me gusta: {e}")
+            logger.warning(f"⚠️ Error al eliminar me gusta: {e}")
             return False
 
     @commands.command()

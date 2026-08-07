@@ -6,6 +6,9 @@ import tempfile
 import time
 import urllib.parse
 from database import get_db_session, AppConfig
+from sznLogger import get_logger
+
+logger = get_logger("utils")
 
 FERNET_KEY = os.getenv("FERNET_KEY")
 fernet = None
@@ -14,7 +17,7 @@ if FERNET_KEY:
         from cryptography.fernet import Fernet
         fernet = Fernet(FERNET_KEY)
     except Exception as e:
-        print(f"⚠️ Error al inicializar Fernet: {e}")
+        logger.warning(f"⚠️ Error al inicializar Fernet: {e}")
 
 _CONFIG_CACHE = {}
 
@@ -29,7 +32,7 @@ def save_config(key: str, value: str):
             else:
                 session.add(AppConfig(key=key, value=encrypted_val))
     except Exception as e:
-        print(f"⚠️ Error al guardar configuración '{key}' en BD: {e}", flush=True)
+        logger.warning(f"⚠️ Error al guardar configuración '{key}' en BD: {e}")
 
 def load_config(key: str) -> str | None:
     if key in _CONFIG_CACHE:
@@ -43,12 +46,12 @@ def load_config(key: str) -> str | None:
                     try:
                         raw_val = fernet.decrypt(raw_val.encode()).decode()
                     except Exception as e:
-                        print(f"❌ Error al desencriptar valor de {key}: {e}")
+                        logger.error(f"❌ Error al desencriptar valor de {key}: {e}")
                         return None
                 _CONFIG_CACHE[key] = raw_val
                 return raw_val
     except Exception as e:
-        print(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
+        logger.warning(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
     return None
 
 def save_guild_queue(guild_id: int, song_queue: list):
@@ -70,7 +73,7 @@ def save_guild_queue(guild_id: int, song_queue: list):
                 })
         save_config(f"queue_{guild_id}", json.dumps(serializable))
     except Exception as e:
-        print(f"⚠️ Error al guardar cola persistente para servidor {guild_id}: {e}", flush=True)
+        logger.warning(f"⚠️ Error al guardar cola persistente para servidor {guild_id}: {e}")
 
 def load_guild_queue(guild_id: int) -> list:
     """Carga y limpia la cola de canciones guardada de un servidor desde la BD."""
@@ -82,7 +85,7 @@ def load_guild_queue(guild_id: int) -> list:
                 save_config(f"queue_{guild_id}", json.dumps([]))
                 return data
     except Exception as e:
-        print(f"⚠️ Error al cargar cola persistente para servidor {guild_id}: {e}", flush=True)
+        logger.warning(f"⚠️ Error al cargar cola persistente para servidor {guild_id}: {e}")
     return []
 
 def is_guild_persist_enabled(guild_id: int) -> bool:
@@ -131,11 +134,11 @@ async def fetch_stealth_cookies() -> str | None:
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        print("ℹ️ Playwright no está instalado.")
+        logger.info("ℹ️ Playwright no está instalado.")
         return None
 
     try:
-        print("🕵️ Generando cookies de YouTube en segundo plano vía Playwright Stealth...")
+        logger.info("🕵️ Generando cookies de YouTube en segundo plano vía Playwright Stealth...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
@@ -159,7 +162,7 @@ async def fetch_stealth_cookies() -> str | None:
                 elif hasattr(playwright_stealth, "stealth"):
                     await playwright_stealth.stealth(page)
             except Exception as e:
-                print(f"ℹ️ Nota sobre stealth: {e}")
+                logger.info(f"ℹ️ Nota sobre stealth: {e}")
 
             await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2)
@@ -184,10 +187,10 @@ async def fetch_stealth_cookies() -> str | None:
             if cookies:
                 netscape_content = json_to_netscape(cookies)
                 save_config("cookies", netscape_content)
-                print("✅ Cookies generadas y guardadas exitosamente vía Playwright Stealth.")
+                logger.info("✅ Cookies generadas y guardadas exitosamente vía Playwright Stealth.")
                 return netscape_content
     except Exception as e:
-        print(f"❌ Error al obtener cookies stealth con Playwright: {e}")
+        logger.error(f"❌ Error al obtener cookies stealth con Playwright: {e}")
     
     return None
 
@@ -276,7 +279,7 @@ async def get_playlist_title(url: str) -> str:
                             if data.get('title'):
                                 return data['title']
             except Exception as e:
-                print(f"⚠️ Error al obtener título de playlist Spotify: {e}", flush=True)
+                logger.warning(f"⚠️ Error al obtener título de playlist Spotify: {e}")
 
     if "youtube.com" in url or "youtu.be" in url:
         try:
@@ -299,7 +302,7 @@ async def get_playlist_title(url: str) -> str:
             if title:
                 return title
         except Exception as e:
-            print(f"⚠️ Error al obtener título de playlist YouTube: {e}", flush=True)
+            logger.warning(f"⚠️ Error al obtener título de playlist YouTube: {e}")
 
     return "Playlist Guardada"
 
@@ -348,14 +351,14 @@ def extract_playlist_metadata(url: str) -> list[dict]:
                     })
             return result
     except Exception as e:
-        print(f"⚠️ Error al extraer playlist de YouTube: {e}", flush=True)
+        logger.warning(f"⚠️ Error al extraer playlist de YouTube: {e}")
         classified = check_yt_error(e)
         if classified:
             proxies = get_proxy_list()
             if proxies:
                 for p_url in proxies:
                     try:
-                        print(f"🔄 Reintentando extracción de playlist vía proxy: {redact_proxy(p_url)}", flush=True)
+                        logger.info(f"🔄 Reintentando extracción de playlist vía proxy: {redact_proxy(p_url)}")
                         proxy_opts = dict(ydl_opts)
                         proxy_opts["proxy"] = p_url
                         with YoutubeDL(proxy_opts) as ydl_p:
@@ -380,10 +383,10 @@ def extract_playlist_metadata(url: str) -> list[dict]:
                                             'id': v_id
                                         })
                                 if res_p:
-                                    print(f"✅ Playlist resuelta exitosamente vía proxy ({redact_proxy(p_url)})", flush=True)
+                                    logger.info(f"✅ Playlist resuelta exitosamente vía proxy ({redact_proxy(p_url)})")
                                     return res_p
                     except Exception as proxy_err:
-                        print(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}", flush=True)
+                        logger.warning(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}")
             raise classified from e
     return []
 
@@ -414,7 +417,7 @@ def extract_flat_metadata(query: str) -> dict | None:
                     'duration': entry.get('duration', 0)
                 }
     except Exception as e:
-        print(f"⚠️ Flat metadata extraction note: {e}", flush=True)
+        logger.warning(f"⚠️ Flat metadata extraction note: {e}")
     return None
 
 async def extract_info(query: str) -> dict:
@@ -442,7 +445,7 @@ async def extract_info(query: str) -> dict:
                             if title:
                                 resolved_title = f"{title} {artist}".strip()
             except Exception as e:
-                print(f"⚠️ Error al resolver oEmbed de Spotify: {e}", flush=True)
+                logger.warning(f"⚠️ Error al resolver oEmbed de Spotify: {e}")
 
         if resolved_title:
             clean_query = resolved_title
@@ -490,7 +493,7 @@ async def extract_info(query: str) -> dict:
                     stream_url = best_valid['url']
 
             if stream_url:
-                print(f"✅ Stream resuelto vía yt-dlp: {entry.get('title')}", flush=True)
+                logger.info(f"✅ Stream resuelto vía yt-dlp: {entry.get('title')}")
                 return {
                     'id': entry.get('id', 'direct'),
                     'title': entry.get('title', clean_query),
@@ -501,14 +504,14 @@ async def extract_info(query: str) -> dict:
                     'http_headers': entry.get('http_headers', {})
                 }
     except Exception as e:
-        print(f"⚠️ Extracción yt-dlp directa falló: {e}", flush=True)
+        logger.warning(f"⚠️ Extracción yt-dlp directa falló: {e}")
         classified = check_yt_error(e)
         if classified:
             proxies = get_proxy_list()
             if proxies:
                 for p_url in proxies:
                     try:
-                        print(f"🔄 Reintentando extracción vía proxy de rescate: {redact_proxy(p_url)}", flush=True)
+                        logger.info(f"🔄 Reintentando extracción vía proxy de rescate: {redact_proxy(p_url)}")
                         proxy_opts = dict(ydl_opts)
                         proxy_opts["proxy"] = p_url
                         def _yt_extract_proxy():
@@ -526,7 +529,7 @@ async def extract_info(query: str) -> dict:
                                     stream_url_p = best_valid_p['url']
 
                             if stream_url_p:
-                                print(f"✅ Stream resuelto exitosamente vía proxy ({redact_proxy(p_url)}): {entry_p.get('title')}", flush=True)
+                                logger.info(f"✅ Stream resuelto exitosamente vía proxy ({redact_proxy(p_url)}): {entry_p.get('title')}")
                                 return {
                                     'id': entry_p.get('id', 'direct'),
                                     'title': entry_p.get('title', clean_query),
@@ -537,7 +540,7 @@ async def extract_info(query: str) -> dict:
                                     'http_headers': entry_p.get('http_headers', {})
                                 }
                     except Exception as proxy_err:
-                        print(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}", flush=True)
+                        logger.warning(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}")
             raise classified from e
         raise ExtractionError(f"No se pudo resolver el stream de audio para: '{query}'") from e
 
@@ -602,5 +605,5 @@ def extract_local_audio_features(file_path: str) -> dict:
             'acousticness': round(1.0 - energy, 3)
         }
     except Exception as e:
-        print(f"⚠️ Error en extracción de audio local: {e}", flush=True)
+        logger.warning(f"⚠️ Error en extracción de audio local: {e}")
         return {}

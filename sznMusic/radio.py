@@ -2,6 +2,9 @@ import asyncio
 import random
 from database import get_db_session, Song
 from .player import _clean_title_for_search, GuildPlayer
+from sznLogger import get_logger
+
+logger = get_logger("music.radio")
 
 GENRE_EXPANSION = {
     # Hip Hop / Rap / Trap
@@ -61,7 +64,7 @@ class MusicRadioMixin:
         queued_titles = [s['title'].lower() for s in player.song_queue if s.get('title')]
         clean_song, extracted_artist = _clean_title_for_search(target_title) if target_title else ("", None)
 
-        print(f"📻 [RADIO DEBUG] [{ctx.guild.name}] target_title='{target_title}'", flush=True)
+        logger.debug(f"📻 [RADIO DEBUG] [{ctx.guild.name}] target_title='{target_title}'")
         recommended_titles = []
 
         if self.sp and target_title:
@@ -83,7 +86,7 @@ class MusicRadioMixin:
                                 seed_artist_id = artist_res['artists']['items'][0]['id']
                                 seed_artist = artist_res['artists']['items'][0]['name']
                         except Exception as e:
-                            print(f"⚠️ [RADIO] Búsqueda de artista falló: {e}", flush=True)
+                            logger.warning(f"⚠️ [RADIO] Búsqueda de artista falló: {e}")
 
                 if seed_artist:
                     # Capa 1: Mismo artista
@@ -98,7 +101,7 @@ class MusicRadioMixin:
                                 if len(recommended_titles) >= 2:
                                     break
                     except Exception as e:
-                        print(f"⚠️ [RADIO] Capa 1 falló: {e}", flush=True)
+                        logger.warning(f"⚠️ [RADIO] Capa 1 falló: {e}")
 
                     # Capa 2: Géneros consolidados
                     if len(recommended_titles) < 5:
@@ -112,14 +115,14 @@ class MusicRadioMixin:
                                         if artist and artist.get('genres'):
                                             genres.extend(artist['genres'])
                                 except Exception as hist_err:
-                                    print(f"⚠️ [RADIO] Error al consultar historial de artistas: {hist_err}", flush=True)
+                                    logger.warning(f"⚠️ [RADIO] Error al consultar historial de artistas: {hist_err}")
 
                             if not genres and seed_artist_id:
                                 try:
                                     artist_info = self.sp.artist(seed_artist_id)
                                     genres = artist_info.get('genres', [])
                                 except Exception as fallback_err:
-                                    print(f"⚠️ [RADIO] Error en fallback de artista: {fallback_err}", flush=True)
+                                    logger.warning(f"⚠️ [RADIO] Error en fallback de artista: {fallback_err}")
 
                             expanded_genres = self._expand_genres(list(set(genres)))
                             if expanded_genres:
@@ -150,7 +153,7 @@ class MusicRadioMixin:
                                     except Exception:
                                         pass
                         except Exception as artist_info_err:
-                            print(f"⚠️ [RADIO] Error procesando géneros: {artist_info_err}", flush=True)
+                            logger.warning(f"⚠️ [RADIO] Error procesando géneros: {artist_info_err}")
 
                     # Capa 3: Similar queries
                     if len(recommended_titles) < 5:
@@ -183,7 +186,7 @@ class MusicRadioMixin:
                             except Exception:
                                 pass
             except Exception as sp_err:
-                print(f"⚠️ [RADIO] Error general de Spotify: {sp_err}", flush=True)
+                logger.warning(f"⚠️ [RADIO] Error general de Spotify: {sp_err}")
 
         # Fallback BD
         if len(recommended_titles) < 5:
@@ -297,7 +300,7 @@ class MusicRadioMixin:
                         player.recent_artist_ids.append(artist_id)
                         if len(player.recent_artist_ids) > 5:
                             player.recent_artist_ids.pop(0)
-                        print(f"📻 [RADIO PROFILE] Artista registrado para guild {player.guild_id}: {track_data['artists'][0]['name']} (Total: {len(player.recent_artist_ids)})", flush=True)
+                        logger.debug(f"📻 [RADIO PROFILE] Artista registrado para guild {player.guild_id}: {track_data['artists'][0]['name']} (Total: {len(player.recent_artist_ids)})")
 
                     try:
                         artist_info = self.sp.artist(artist_id)
@@ -312,9 +315,9 @@ class MusicRadioMixin:
                             popularity=popularity
                         )
                     except Exception as meta_err:
-                        print(f"⚠️ Error al guardar metadatos de telemetría de recomendación en BD: {meta_err}", flush=True)
+                        logger.warning(f"⚠️ Error al guardar metadatos de telemetría de recomendación en BD: {meta_err}")
             except Exception as e:
-                print(f"⚠️ Error registrando artista reciente para radio: {e}", flush=True)
+                logger.warning(f"⚠️ Error registrando artista reciente para radio: {e}")
 
         self.bot.loop.create_task(_async_lookup())
 
@@ -381,7 +384,7 @@ class MusicRadioMixin:
             
             if added_count > 0:
                 source_info = recommendations[0].get('source', 'ml')
-                print(f"🤖 [RecSys] {added_count} canciones añadidas a la cola via {source_info}", flush=True)
+                logger.info(f"🤖 [RecSys] {added_count} canciones añadidas a la cola via {source_info}")
                 
         except Exception as e:
-            print(f"⚠️ [RecSys] Error en autoplay ML: {e}", flush=True)
+            logger.warning(f"⚠️ [RecSys] Error en autoplay ML: {e}")
