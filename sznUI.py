@@ -1132,7 +1132,7 @@ class PlaylistSelect(discord.ui.Select):
         selected_url = self.values[0]
         await interaction.response.send_message(f"🚀 Reproduciendo playlist seleccionada: {selected_url}", ephemeral=True)
         
-        music_cog = interaction.client.get_cog("Music")
+        music_cog = interaction.client.get_cog("MusicCore") or interaction.client.get_cog("Music")
         if music_cog:
             ctx = await interaction.client.get_context(interaction.message)
             ctx.author = interaction.user
