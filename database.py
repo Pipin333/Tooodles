@@ -112,7 +112,13 @@ def setup_database():
     
     # Manejar migración de nuevas columnas con transacciones explícitas
     with engine.begin() as conn:
-        for col_name, col_type in [("spotify_id", "VARCHAR"), ("genres", "VARCHAR"), ("popularity", "INTEGER")]:
+        audio_cols = [
+            ("spotify_id", "VARCHAR"), ("genres", "VARCHAR"), ("popularity", "INTEGER"),
+            ("danceability", "FLOAT"), ("energy", "FLOAT"), ("valence", "FLOAT"),
+            ("tempo", "FLOAT"), ("acousticness", "FLOAT"), ("instrumentalness", "FLOAT"),
+            ("liveness", "FLOAT"), ("speechiness", "FLOAT")
+        ]
+        for col_name, col_type in audio_cols:
             try:
                 conn.execute(text(f"ALTER TABLE songs ADD COLUMN {col_name} {col_type}"))
                 print(f"🗄️ Columna '{col_name}' agregada exitosamente a 'songs'.")
