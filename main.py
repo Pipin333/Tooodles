@@ -18,7 +18,7 @@ intents.voice_states = True
 
 def get_prefix(bot, message):
     if not message.guild:
-        return 'td?'
+        return ['td?', '']
     try:
         custom = load_config(f"prefix_{message.guild.id}")
         return custom if custom else 'td?'

@@ -86,6 +86,14 @@ class SavedPlaylist(Base):
     url = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# Modelo para usuarios de confianza (Trusted Users) con acceso a comandos de Admin/DM
+class TrustedUser(Base):
+    __tablename__ = 'trusted_users'
+
+    user_id = Column(String, primary_key=True)
+    username = Column(String, nullable=True)
+    added_at = Column(DateTime, default=datetime.utcnow)
+
 # Modelo para registro de reproducción y telemetría de recomendador
 class PlayLog(Base):
     __tablename__ = 'play_logs'
@@ -318,6 +326,35 @@ def get_saved_playlists(guild_id: str) -> list[dict]:
     with get_db_session() as session:
         pls = session.query(SavedPlaylist).filter_by(guild_id=g_id).order_by(SavedPlaylist.id.desc()).all()
         return [{'id': p.id, 'name': p.name, 'url': p.url, 'user_id': p.user_id} for p in pls]
+
+def add_trusted_user(user_id: str, username: str = None) -> bool:
+    u_id = str(user_id)
+    with get_db_session() as session:
+        existing = session.query(TrustedUser).filter_by(user_id=u_id).first()
+        if not existing:
+            session.add(TrustedUser(user_id=u_id, username=username or "TrustedUser"))
+            return True
+    return False
+
+def remove_trusted_user(user_id: str) -> bool:
+    u_id = str(user_id)
+    with get_db_session() as session:
+        existing = session.query(TrustedUser).filter_by(user_id=u_id).first()
+        if existing:
+            session.delete(existing)
+            return True
+    return False
+
+def get_trusted_users() -> list[dict]:
+    with get_db_session() as session:
+        users = session.query(TrustedUser).all()
+        return [{'user_id': u.user_id, 'username': u.username, 'added_at': u.added_at} for u in users]
+
+def is_user_trusted(user_id: str) -> bool:
+    u_id = str(user_id)
+    with get_db_session() as session:
+        existing = session.query(TrustedUser).filter_by(user_id=u_id).first()
+        return existing is not None
 
 def get_recsys_data():
     """Exporta todos los datos necesarios para entrenar el sistema de recomendación.

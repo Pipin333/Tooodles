@@ -692,10 +692,81 @@ class MusicUI(commands.Cog):
         async def change_prefix_btn(self, interaction: discord.Interaction, button: Button):
             await interaction.response.send_modal(PrefixModal(self))
 
+    async def _is_authorized_admin_or_trusted(self, ctx) -> bool:
+        from database import is_user_trusted
+        if is_user_trusted(ctx.author.id):
+            return True
+        is_owner = await self.bot.is_owner(ctx.author)
+        if is_owner:
+            return True
+        if ctx.guild and ctx.author.guild_permissions.administrator:
+            return True
+        return False
+
+    @commands.command(name="trusted", aliases=["trust"])
+    async def trusted_cmd(self, ctx, action: str = None, user_arg: str = None):
+        """Administra los usuarios de confianza (Solo Dueño del Bot)."""
+        is_owner = await self.bot.is_owner(ctx.author)
+        if not is_owner:
+            await ctx.send("❌ Solo el **Dueño del Bot** puede ver o gestionar la lista de usuarios Trusted.")
+            return
+
+        from database import add_trusted_user, remove_trusted_user, get_trusted_users
+
+        if action and action.lower() in ["add", "agregar", "sumar"]:
+            if not user_arg:
+                await ctx.send("⚠️ Uso: `td?trusted add @usuario_o_ID`")
+                return
+            import re
+            match = re.search(r'\d+', user_arg)
+            target_id = match.group(0) if match else user_arg.strip()
+            
+            target_user = self.bot.get_user(int(target_id)) if target_id.isdigit() else None
+            uname = target_user.name if target_user else f"User_{target_id}"
+            
+            ok = add_trusted_user(target_id, uname)
+            if ok:
+                await ctx.send(f"✅ Usuario **@{uname}** (`{target_id}`) añadido como **Trusted**.")
+            else:
+                await ctx.send(f"ℹ️ El usuario **@{uname}** ya estaba en la lista de Trusted.")
+            return
+
+        if action and action.lower() in ["remove", "del", "delete", "eliminar"]:
+            if not user_arg:
+                await ctx.send("⚠️ Uso: `td?trusted remove @usuario_o_ID`")
+                return
+            import re
+            match = re.search(r'\d+', user_arg)
+            target_id = match.group(0) if match else user_arg.strip()
+            
+            ok = remove_trusted_user(target_id)
+            if ok:
+                await ctx.send(f"🗑️ Usuario con ID `{target_id}` eliminado de la lista **Trusted**.")
+            else:
+                await ctx.send(f"⚠️ No se encontró al usuario con ID `{target_id}` en la lista Trusted.")
+            return
+
+        users = get_trusted_users()
+        embed = discord.Embed(
+            title="🛡️ Usuarios de Confianza (Trusted Users)",
+            description=f"Hay **{len(users)}** usuarios con acceso prioritario a comandos de Admin / Debug por DM.",
+            color=0x1db954
+        )
+        if users:
+            lines = [f"• **@{u['username']}** (`{u['user_id']}`)" for u in users]
+            embed.add_field(name="📋 Lista de Trusted Users", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="ℹ️ Lista Vacía", value="Aún no hay usuarios de confianza registrados. Usa `td?trusted add @usuario`.", inline=False)
+            
+        await ctx.send(embed=embed)
+
     @commands.command(name="logs", aliases=["log"])
-    @commands.has_permissions(administrator=True)
     async def view_logs(self, ctx, lines: int = 20):
-        """Muestra las últimas N líneas del archivo de logs del bot (Solo Admin)."""
+        """Muestra las últimas N líneas del archivo de logs del bot (Admin / Trusted / DM)."""
+        if not await self._is_authorized_admin_or_trusted(ctx):
+            await ctx.send("❌ Este comando requiere permisos de Administrador o estar en la lista Trusted.")
+            return
+
         import os
         log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tooodles.log")
         
@@ -703,7 +774,7 @@ class MusicUI(commands.Cog):
             await ctx.send("📭 Aún no existe el archivo de logs.")
             return
 
-        lines = max(1, min(lines, 50))  # Límite entre 1 y 50 líneas
+        lines = max(1, min(lines, 50))
         try:
             with open(log_file, "r", encoding="utf-8") as f:
                 all_lines = f.readlines()
@@ -730,6 +801,151 @@ class MusicUI(commands.Cog):
 
         except Exception as e:
             await ctx.send(f"❌ Error al leer el archivo de logs: {e}")
+
+    @commands.command(name="debug", aliases=["status", "botstatus"])
+    async def debug_status(self, ctx):
+        """Muestra el estado de diagnóstico y telemetría del sistema (Admin / Trusted / DM)."""
+        if not await self._is_authorized_admin_or_trusted(ctx):
+            await ctx.send("❌ Este comando requiere permisos de Administrador o estar en la lista Trusted.")
+            return
+
+        import os, sys, time, glob
+        embed = discord.Embed(
+            title="🤖 Diagnóstico y Estado del Bot",
+            color=0x00d2d3,
+            timestamp=discord.utils.utcnow()
+        )
+        
+        # Conexiones
+        n_guilds = len(self.bot.guilds)
+        n_vc = len(self.bot.voice_clients)
+        embed.add_field(name="🌐 Discord", value=f"• Servidores: **{n_guilds}**\n• Canales de voz activos: **{n_vc}**", inline=True)
+        
+        # Archivos de logs & caché
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "tooodles.log")
+        log_size = (os.path.getsize(log_path) / (1024 * 1024)) if os.path.exists(log_path) else 0.0
+        
+        import tempfile
+        tmp_dir = tempfile.gettempdir()
+        cache_files = glob.glob(os.path.join(tmp_dir, "cache_*.webm"))
+        embed.add_field(name="💾 Almacenamiento & Logs", value=f"• Log File: **{log_size:.2f} MB**\n• Audios en `/tmp`: **{len(cache_files)} archivos**", inline=True)
+        
+        # RecSys Engine Status
+        music_cog = self.bot.get_cog("Music")
+        recsys_status = "❌ Inactivo"
+        if music_cog and getattr(music_cog, 'recsys', None):
+            rc = music_cog.recsys
+            if rc.loaded:
+                n_users = len(rc.user_id_map)
+                n_songs = len(rc.song_id_map)
+                recsys_status = f"✅ Cargado ({n_users} usuarios, {n_songs} canciones, 520 dims)"
+        
+        embed.add_field(name="🧠 Motor RecSys Híbrido", value=f"• Estado: {recsys_status}", inline=False)
+        embed.set_footer(text=f"Solicitado por @{ctx.author.name}")
+        await ctx.send(embed=embed)
+
+    @commands.command(name="train", aliases=["recsys_train"])
+    async def trigger_recsys_train(self, ctx):
+        """Gatilla manualmente el reentrenamiento offline del RecSys (Admin / Trusted / DM)."""
+        if not await self._is_authorized_admin_or_trusted(ctx):
+            await ctx.send("❌ Este comando requiere permisos de Administrador o estar en la lista Trusted.")
+            return
+
+        msg = await ctx.send("🧠 Iniciando entrenamiento offline del RecSys Híbrido (256 dims, 50 ALS iters, 100 Item2Vec epochs)...")
+        try:
+            import subprocess
+            res = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, "-m", "recsys.train"],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            if res.returncode == 0:
+                music_cog = self.bot.get_cog("Music")
+                if music_cog and getattr(music_cog, 'recsys', None):
+                    music_cog.recsys.reload_if_updated()
+                await msg.edit(content="✅ **Entrenamiento del RecSys completado y motor recargado exitosamente.**")
+            else:
+                await msg.edit(content=f"⚠️ Entrenamiento finalizó con código {res.returncode}:\n```text\n{res.stderr[:500]}\n```")
+        except Exception as e:
+            await ctx.send(f"❌ Error al ejecutar entrenamiento: {e}")
+
+    @commands.command(name="help", aliases=["ayuda", "h"])
+    async def help_cmd(self, ctx):
+        """Muestra la guía contextual de comandos del bot (Servidor vs DM)."""
+        is_dm = ctx.guild is None
+        from sznUtils import load_config
+
+        if is_dm:
+            embed = discord.Embed(
+                title="📬 Toodles — Guía de Comandos Directos (DM)",
+                description="En Mensajes Directos tienes acceso a comandos de administración, diagnóstico y control del sistema.\n\n*Tip: No necesitas usar prefijo en DM; puedes escribir los comandos directamente (ej: `logs`, `debug`, `train`).*",
+                color=0x7d5fff,
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="📋 Diagnóstico y Logs",
+                value="• `logs [N]` — Muestra las últimas N líneas del archivo de logs (`tooodles.log`).\n"
+                      "• `debug` / `status` — Ficha técnica de conexiones, memoria RAM/disco, cache `/tmp` y RecSys.",
+                inline=False
+            )
+            embed.add_field(
+                name="🧠 Inteligencia RecSys & Modelos",
+                value="• `train` — Gatilla el reentrenamiento offline inmediato del RecSys Híbrido (520 dims).\n"
+                      "• `reloadrecsys` — Recarga los artefactos entrenados en caliente.",
+                inline=False
+            )
+            embed.add_field(
+                name="🛡️ Seguridad & Permisos",
+                value="• `trusted list` — Muestra la lista de usuarios de confianza.\n"
+                      "• `trusted add @user` — Agrega un usuario a la lista Trusted.\n"
+                      "• `trusted remove @user` — Elimina un usuario de la lista Trusted.",
+                inline=False
+            )
+            embed.add_field(
+                name="📚 Colección",
+                value="• `playlists` — Abre el gestor interactivo de playlists guardadas.",
+                inline=False
+            )
+            embed.set_footer(text=f"Sesión Privada  •  @{ctx.author.name}")
+        else:
+            prefix = load_config(f"prefix_{ctx.guild.id}") or "td?"
+            embed = discord.Embed(
+                title=f"🎵 Toodles — Comandos del Servidor ({ctx.guild.name})",
+                description=f"Prefijo actual: `{prefix}`  •  Bot de música con recomendador por IA.",
+                color=0x00d2d3,
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(
+                name="🎧 Reproducción de Música",
+                value=f"• `{prefix}play <canción / URL>` — Reproduce o añade a la cola (YouTube/Spotify).\n"
+                      f"• `{prefix}skip` (`s`) — Salta la canción actual.\n"
+                      f"• `{prefix}queue` (`q`) — Muestra la cola interactiva paginada.\n"
+                      f"• `{prefix}stop` / `{prefix}clear` — Detiene la música o limpia la cola.",
+                inline=False
+            )
+            embed.add_field(
+                name="📻 Recomendador IA & Feedback",
+                value=f"• `{prefix}radio` — Activa/desactiva el modo Autoplay por IA.\n"
+                      f"• `{prefix}like` — Registra tu Like en el sistema de recomendación.\n"
+                      f"• `{prefix}dislike` — Registra tu Dislike y salta la canción.",
+                inline=False
+            )
+            embed.add_field(
+                name="📚 Colección de Playlists",
+                value=f"• `{prefix}playlists` (`pl`) — Despliega el menú interactivo para seleccionar o guardar playlists.",
+                inline=False
+            )
+            embed.add_field(
+                name="⚙️ Configuración del Servidor (Admin)",
+                value=f"• `{prefix}channel aqui` — Restringe los comandos a este canal de texto.\n"
+                      f"• `{prefix}settings` — Panel de control interactivo del bot.",
+                inline=False
+            )
+            embed.set_footer(text=f"Solicitado por @{ctx.author.name}")
+
+        await ctx.send(embed=embed)
 
     @commands.command(name="playlists", aliases=["pl", "playlist"])
     async def playlists_cmd(self, ctx, action: str = None, *, args: str = None):
