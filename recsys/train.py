@@ -44,14 +44,14 @@ WEIGHT_COMPLETED  =  2.0   # Canción escuchada >= 80% de su duración
 WEIGHT_REQUESTED  =  1.0   # El usuario la pidió directamente
 WEIGHT_EARLY_SKIP = -3.0   # Skip en los primeros 30 segundos
 
-# ─── Hiperparámetros de modelos ──────────────────────────────────────
-ALS_FACTORS        = 64
+# ─── Hiperparámetros de modelos (Enterprise High-Precision Grade) ──────
+ALS_FACTORS        = 256
 ALS_REGULARIZATION = 0.05
-ALS_ITERATIONS     = 20
-ITEM2VEC_DIM       = 64
-ITEM2VEC_WINDOW    = 5
+ALS_ITERATIONS     = 50
+ITEM2VEC_DIM       = 256
+ITEM2VEC_WINDOW    = 10
 ITEM2VEC_MIN_COUNT = 1
-ITEM2VEC_EPOCHS    = 30
+ITEM2VEC_EPOCHS    = 100
 
 
 def build_interaction_matrix(play_logs, likes, dislikes, songs):
