@@ -48,6 +48,9 @@ class RecSysEngine:
         self.item2vec_vectors = None
         self.item_norms = None
         self.item2vec_norms = None
+        self.audio_feature_vectors = None
+        self.hybrid_item_factors = None
+        self.hybrid_norms = None
         
         # Mapeos
         self.user_id_map = {}      # user_id (str) -> user_idx (int)
@@ -122,11 +125,31 @@ class RecSysEngine:
                 self.item_norms = np.linalg.norm(self.item_factors, axis=1, keepdims=True)
                 self.item_norms = np.where(self.item_norms == 0, 1e-10, self.item_norms)
             
+            self.audio_feature_vectors = None
+            self.hybrid_item_factors = None
+            self.hybrid_norms = None
+
             # Embeddings Item2Vec
             if 'item2vec_vectors' in data:
                 self.item2vec_vectors = data['item2vec_vectors']
                 self.item2vec_norms = np.linalg.norm(self.item2vec_vectors, axis=1, keepdims=True)
                 self.item2vec_norms = np.where(self.item2vec_norms == 0, 1e-10, self.item2vec_norms)
+            
+            # Características acústicas (Audio Features) de Spotify
+            if 'audio_feature_vectors' in data:
+                self.audio_feature_vectors = data['audio_feature_vectors']
+
+            # Construir espacio vectorial híbrido multimodal (Item2Vec + Audio Features)
+            if self.item2vec_vectors is not None:
+                if self.audio_feature_vectors is not None:
+                    audio_norm = self.audio_feature_vectors / (np.linalg.norm(self.audio_feature_vectors, axis=1, keepdims=True) + 1e-10)
+                    item2vec_norm = self.item2vec_vectors / self.item2vec_norms
+                    self.hybrid_item_factors = np.hstack([item2vec_norm, audio_norm * 0.5])
+                else:
+                    self.hybrid_item_factors = self.item2vec_vectors
+
+                self.hybrid_norms = np.linalg.norm(self.hybrid_item_factors, axis=1, keepdims=True)
+                self.hybrid_norms = np.where(self.hybrid_norms == 0, 1e-10, self.hybrid_norms)
             
             # Pares negativos
             neg_users = data.get('negative_score_users', np.array([], dtype=np.int32))
@@ -285,7 +308,11 @@ class RecSysEngine:
         
         target_idx = self.song_id_map[target_song_id]
         
-        if use_item2vec and self.item2vec_vectors is not None:
+        if use_item2vec and getattr(self, 'hybrid_item_factors', None) is not None:
+            vectors = self.hybrid_item_factors
+            norms = self.hybrid_norms
+            source_label = 'hybrid_item2vec_audio'
+        elif use_item2vec and self.item2vec_vectors is not None:
             vectors = self.item2vec_vectors
             norms = self.item2vec_norms
             source_label = 'item2vec'

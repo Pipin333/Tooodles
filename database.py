@@ -1,7 +1,7 @@
 import os
 from contextlib import contextmanager
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, DateTime
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -38,6 +38,14 @@ class Song(Base):
     spotify_id = Column(String, index=True)
     genres = Column(String)  # Guardado como string separado por comas
     popularity = Column(Integer)
+    danceability = Column(Float, nullable=True)
+    energy = Column(Float, nullable=True)
+    valence = Column(Float, nullable=True)
+    tempo = Column(Float, nullable=True)
+    acousticness = Column(Float, nullable=True)
+    instrumentalness = Column(Float, nullable=True)
+    liveness = Column(Float, nullable=True)
+    speechiness = Column(Float, nullable=True)
 
     def __repr__(self):
         return f"<Song(id={self.id}, title={self.title}, artist={self.artist}, played_count={self.played_count})>"
@@ -299,7 +307,11 @@ def get_recsys_data():
             songs.append({
                 'id': s.id, 'title': s.title, 'artist': s.artist,
                 'duration': s.duration, 'spotify_id': s.spotify_id,
-                'genres': s.genres, 'popularity': s.popularity
+                'genres': s.genres, 'popularity': s.popularity,
+                'danceability': s.danceability, 'energy': s.energy,
+                'valence': s.valence, 'tempo': s.tempo,
+                'acousticness': s.acousticness, 'instrumentalness': s.instrumentalness,
+                'liveness': s.liveness, 'speechiness': s.speechiness
             })
 
         return {
@@ -308,6 +320,26 @@ def get_recsys_data():
             'dislikes': dislikes,
             'songs': songs
         }
+
+def save_spotify_audio_features_bulk(features_list: list[dict]):
+    """Guarda un lote de audio features de Spotify en la BD."""
+    if not features_list:
+        return
+    with get_db_session() as session:
+        for f in features_list:
+            if not f or not isinstance(f, dict) or not f.get('id'):
+                continue
+            sp_id = f['id']
+            songs = session.query(Song).filter(Song.spotify_id == sp_id).all()
+            for song in songs:
+                song.danceability = f.get('danceability')
+                song.energy = f.get('energy')
+                song.valence = f.get('valence')
+                song.tempo = f.get('tempo')
+                song.acousticness = f.get('acousticness')
+                song.instrumentalness = f.get('instrumentalness')
+                song.liveness = f.get('liveness')
+                song.speechiness = f.get('speechiness')
 
 def get_session_sequences(guild_id=None, session_gap_minutes=30):
     """Extrae secuencias de reproducción por sesión para entrenamiento Item2Vec.

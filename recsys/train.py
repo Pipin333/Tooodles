@@ -277,15 +277,85 @@ def train_item2vec(session_sequences, song_id_map):
     return item2vec_vectors
 
 
-def export_artifacts(user_factors, item_factors, item2vec_vectors,
-                     user_id_map, song_id_map, reverse_song_map, 
-                     reverse_user_map, songs_metadata, interaction_matrix):
+def fetch_spotify_audio_features(songs_metadata):
+    """Consulta y guarda en lote las audio features de Spotify para canciones en catálogo."""
+    import spotipy
+    from spotipy.oauth2 import SpotifyClientCredentials
+    from database import save_spotify_audio_features_bulk
+    
+    cid = os.getenv("client_id")
+    secret = os.getenv("client_secret")
+    if not cid or not secret:
+        print("ℹ️ Credenciales de Spotify no disponibles para audio features.")
+        return
+
+    missing_sp_ids = []
+    for s in songs_metadata:
+        sp_id = s.get('spotify_id')
+        if sp_id and s.get('danceability') is None:
+            missing_sp_ids.append(sp_id)
+
+    if not missing_sp_ids:
+        print("✅ Todas las canciones con Spotify ID ya cuentan con Audio Features en BD.")
+        return
+
+    print(f"🎵 Consultando Audio Features de Spotify para {len(missing_sp_ids)} canciones...")
+    try:
+        sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=cid, client_secret=secret))
+        
+        for i in range(0, len(missing_sp_ids), 100):
+            batch = missing_sp_ids[i:i+100]
+            features_res = sp.audio_features(batch)
+            if features_res:
+                valid_features = [f for f in features_res if f and isinstance(f, dict)]
+                save_spotify_audio_features_bulk(valid_features)
+                
+        print("✅ Audio Features de Spotify guardadas exitosamente en la BD.")
+    except Exception as e:
+        print(f"⚠️ Error al obtener audio features de Spotify: {e}")
+
+
+def build_audio_feature_matrix(songs_metadata, song_id_map):
+    """Construye la matriz normalizada de 8 características acústicas por canción.
+    
+    Campos: danceability, energy, valence, tempo, acousticness, instrumentalness, liveness, speechiness.
+    """
+    n_songs = len(song_id_map)
+    audio_matrix = np.zeros((n_songs, 8), dtype=np.float32)
+    
+    song_dict = {s['id']: s for s in songs_metadata}
+    for s_id, s_idx in song_id_map.items():
+        s = song_dict.get(s_id)
+        if not s:
+            continue
+        
+        tempo = s.get('tempo') or 120.0
+        norm_tempo = min(max(float(tempo) / 220.0, 0.0), 1.0)
+        
+        audio_matrix[s_idx] = [
+            float(s.get('danceability') or 0.5),
+            float(s.get('energy') or 0.5),
+            float(s.get('valence') or 0.5),
+            norm_tempo,
+            float(s.get('acousticness') or 0.5),
+            float(s.get('instrumentalness') or 0.0),
+            float(s.get('liveness') or 0.2),
+            float(s.get('speechiness') or 0.1)
+        ]
+        
+    return audio_matrix
+
+
+def export_artifacts(user_factors, item_factors, item2vec_vectors, audio_feature_vectors,
+                      user_id_map, song_id_map, reverse_song_map, 
+                      reverse_user_map, songs_metadata, interaction_matrix):
     """Exporta todos los artefactos de entrenamiento a un archivo .npz.
     
     Contenido del archivo:
     - user_factors: Embeddings ALS de usuarios
     - item_factors: Embeddings ALS de canciones
     - item2vec_vectors: Embeddings Item2Vec de canciones
+    - audio_feature_vectors: Características acústicas
     - user_id_map_keys/values: Mapeo user_id -> índice
     - song_id_map_keys/values: Mapeo song_id -> índice
     - reverse_song_map_keys/values: Mapeo índice -> song_id
@@ -331,6 +401,8 @@ def export_artifacts(user_factors, item_factors, item2vec_vectors,
         save_dict['item_factors'] = item_factors
     if item2vec_vectors is not None:
         save_dict['item2vec_vectors'] = item2vec_vectors
+    if audio_feature_vectors is not None:
+        save_dict['audio_feature_vectors'] = audio_feature_vectors
     
     np.savez_compressed(ARTIFACTS_PATH, **save_dict)
     file_size = os.path.getsize(ARTIFACTS_PATH) / (1024 * 1024)
@@ -340,7 +412,7 @@ def export_artifacts(user_factors, item_factors, item2vec_vectors,
 def main():
     """Pipeline principal de entrenamiento del RecSys."""
     print("=" * 60)
-    print("🚀 Toodles RecSys — Entrenamiento Offline")
+    print("🚀 Toodles RecSys — Entrenamiento Offline (Híbrido Multimodal)")
     print("=" * 60)
     
     total_start = time.time()
@@ -365,8 +437,14 @@ def main():
         print("   El bot usará recomendaciones basadas en Spotify como fallback.")
         return
     
-    # ─── Paso 2: Construir matriz de interacción ────────────────────
-    print("\n📊 Paso 2: Construyendo matriz de interacción R(u,i)...")
+    # ─── Paso 2: Audio Features de Spotify ─────────────────────────
+    fetch_spotify_audio_features(songs)
+    # Volver a cargar la lista de canciones actualizada con las nuevas audio features
+    data = get_recsys_data()
+    songs = data['songs']
+
+    # ─── Paso 3: Construir matriz de interacción ────────────────────
+    print("\n📊 Paso 3: Construyendo matriz de interacción R(u,i)...")
     result = build_interaction_matrix(play_logs, likes, dislikes, songs)
     interaction_matrix, user_id_map, song_id_map, reverse_song_map, reverse_user_map = result
     
@@ -374,12 +452,12 @@ def main():
         print("❌ No se pudo construir la matriz. Abortando.")
         return
     
-    # ─── Paso 3: Entrenar ALS ────────────────────────────────────────
-    print("\n🧠 Paso 3: Entrenando modelo Implicit ALS...")
+    # ─── Paso 4: Entrenar ALS ────────────────────────────────────────
+    print("\n🧠 Paso 4: Entrenando modelo Implicit ALS...")
     user_factors, item_factors = train_als_model(interaction_matrix)
     
-    # ─── Paso 4: Extraer secuencias de sesión y entrenar Item2Vec ──
-    print("\n🎵 Paso 4: Extrayendo secuencias de sesión...")
+    # ─── Paso 5: Extraer secuencias de sesión y entrenar Item2Vec ──
+    print("\n🎵 Paso 5: Extrayendo secuencias de sesión...")
     session_sequences = get_session_sequences()
     print(f"   → {len(session_sequences)} sesiones extraídas")
     
@@ -388,15 +466,21 @@ def main():
         avg_len = total_tracks / len(session_sequences)
         print(f"   → {total_tracks} tracks totales (promedio {avg_len:.1f} tracks/sesión)")
     
-    print("\n🧠 Paso 5: Entrenando Item2Vec...")
+    print("\n🧠 Paso 6: Entrenando Item2Vec...")
     item2vec_vectors = train_item2vec(session_sequences, song_id_map)
     
-    # ─── Paso 5: Exportar artefactos ─────────────────────────────────
-    print("\n💾 Paso 6: Exportando artefactos...")
+    # ─── Paso 7: Matriz de Audio Features ───────────────────────────
+    print("\n🎼 Paso 7: Construyendo matriz de Audio Features (Danceability, Energy, Valence, Tempo)...")
+    audio_feature_vectors = build_audio_feature_matrix(songs, song_id_map)
+    print(f"   → {audio_feature_vectors.shape[0]} canciones x {audio_feature_vectors.shape[1]} características acústicas")
+
+    # ─── Paso 8: Exportar artefactos ─────────────────────────────────
+    print("\n💾 Paso 8: Exportando artefactos...")
     export_artifacts(
         user_factors=user_factors,
         item_factors=item_factors,
         item2vec_vectors=item2vec_vectors,
+        audio_feature_vectors=audio_feature_vectors,
         user_id_map=user_id_map,
         song_id_map=song_id_map,
         reverse_song_map=reverse_song_map,
