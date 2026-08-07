@@ -75,6 +75,17 @@ class UserDislike(Base):
     song_id = Column(Integer, ForeignKey('songs.id'), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
+# Modelo para playlists guardadas por el servidor
+class SavedPlaylist(Base):
+    __tablename__ = 'saved_playlists'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    guild_id = Column(String, index=True, nullable=False)
+    user_id = Column(String, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    url = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 # Modelo para registro de reproducción y telemetría de recomendador
 class PlayLog(Base):
     __tablename__ = 'play_logs'
@@ -272,6 +283,41 @@ def remove_dislike(user_id, song_title):
             session.delete(existing)
             return True
         return False
+
+def add_saved_playlist(guild_id: str, user_id: str, name: str, url: str) -> bool:
+    """Guarda o actualiza una playlist en el servidor."""
+    g_id = str(guild_id)
+    u_id = str(user_id)
+    n_clean = name.strip()
+    with get_db_session() as session:
+        existing = session.query(SavedPlaylist).filter_by(guild_id=g_id, name=n_clean).first()
+        if existing:
+            existing.url = url
+            existing.user_id = u_id
+        else:
+            pl = SavedPlaylist(guild_id=g_id, user_id=u_id, name=n_clean, url=url)
+            session.add(pl)
+    return True
+
+def remove_saved_playlist(guild_id: str, name_or_id: str) -> bool:
+    """Elimina una playlist guardada por nombre o ID."""
+    g_id = str(guild_id)
+    with get_db_session() as session:
+        if name_or_id.isdigit():
+            pl = session.query(SavedPlaylist).filter_by(guild_id=g_id, id=int(name_or_id)).first()
+        else:
+            pl = session.query(SavedPlaylist).filter_by(guild_id=g_id, name=name_or_id.strip()).first()
+        if pl:
+            session.delete(pl)
+            return True
+    return False
+
+def get_saved_playlists(guild_id: str) -> list[dict]:
+    """Retorna todas las playlists guardadas para un servidor."""
+    g_id = str(guild_id)
+    with get_db_session() as session:
+        pls = session.query(SavedPlaylist).filter_by(guild_id=g_id).order_by(SavedPlaylist.id.desc()).all()
+        return [{'id': p.id, 'name': p.name, 'url': p.url, 'user_id': p.user_id} for p in pls]
 
 def get_recsys_data():
     """Exporta todos los datos necesarios para entrenar el sistema de recomendación.

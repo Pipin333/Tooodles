@@ -731,9 +731,154 @@ class MusicUI(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error al leer el archivo de logs: {e}")
 
-        @discord.ui.button(label="❌ Cerrar", style=discord.ButtonStyle.danger, custom_id="close_settings")
-        async def close_settings(self, interaction: discord.Interaction, button: Button):
-            await interaction.message.delete()
+    @commands.command(name="playlists", aliases=["pl", "playlist"])
+    async def playlists_cmd(self, ctx, action: str = None, *, args: str = None):
+        """Muestra o administra las playlists guardadas del servidor."""
+        if not ctx.guild:
+            await ctx.send("⚠️ Este comando solo funciona en servidores.")
+            return
+
+        guild_id = ctx.guild.id
+        from database import add_saved_playlist, remove_saved_playlist, get_saved_playlists
+        
+        if action and action.lower() in ["add", "agregar", "guardar"]:
+            if not args or " " not in args:
+                await ctx.send("⚠️ Uso: `td?playlist add <Nombre> <URL>` (ej: `td?playlist add Cumbia90s https://...`)")
+                return
+            parts = args.split(" ", 1)
+            name, url = parts[0], parts[1]
+            add_saved_playlist(guild_id, ctx.author.id, name, url)
+            await ctx.send(f"✅ Playlist **{name}** guardada correctamente.")
+            return
+
+        if action and action.lower() in ["remove", "del", "delete", "eliminar"]:
+            if not args:
+                await ctx.send("⚠️ Uso: `td?playlist remove <Nombre>`")
+                return
+            ok = remove_saved_playlist(guild_id, args)
+            if ok:
+                await ctx.send(f"🗑️ Playlist **{args}** eliminada de la colección.")
+            else:
+                await ctx.send(f"⚠️ No se encontró la playlist **{args}**.")
+            return
+
+        pls = get_saved_playlists(guild_id)
+        embed = discord.Embed(
+            title="📚 Colección de Playlists del Servidor",
+            description=f"Hay **{len(pls)}** playlists guardadas.\nSelecciona una en el menú desplegable para reproducirla de inmediato.",
+            color=0x00d2d3
+        )
+        if pls:
+            pl_lines = [f"• **{p['name']}** — `{p['url'][:50]}...`" for p in pls[:10]]
+            embed.add_field(name="📋 Playlists Guardadas", value="\n".join(pl_lines), inline=False)
+        else:
+            embed.add_field(name="ℹ️ Colección vacía", value="Aún no hay playlists guardadas. Usa el botón `➕ Agregar Playlist` o `td?playlist add <Nombre> <URL>`.", inline=False)
+
+        view = PlaylistsView(guild_id, self.bot)
+        await ctx.send(embed=embed, view=view)
+
+
+class AddPlaylistModal(Modal, title="➕ Guardar Nueva Playlist"):
+    name_input = TextInput(
+        label="Nombre de la Playlist",
+        placeholder="ej: Cumbia 90s, Nightcore, Chill Lofi",
+        min_length=2,
+        max_length=40,
+        required=True
+    )
+    url_input = TextInput(
+        label="Link de YouTube o Spotify",
+        placeholder="https://www.youtube.com/playlist?list=... o Spotify URL",
+        min_length=10,
+        max_length=300,
+        required=True
+    )
+
+    def __init__(self, parent_view=None):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = self.name_input.value.strip()
+        url = self.url_input.value.strip()
+        from database import add_saved_playlist
+        add_saved_playlist(interaction.guild.id, interaction.user.id, name, url)
+        
+        await interaction.response.send_message(
+            f"✅ Playlist **{name}** guardada correctamente.",
+            ephemeral=True
+        )
+        if self.parent_view:
+            await self.parent_view.refresh(interaction)
+
+
+class PlaylistSelect(discord.ui.Select):
+    def __init__(self, playlists):
+        options = []
+        for pl in playlists[:25]:
+            options.append(discord.SelectOption(
+                label=pl['name'][:100],
+                value=pl['url'],
+                description=f"Link: {pl['url'][:45]}...",
+                emoji="🎵"
+            ))
+        super().__init__(
+            placeholder="🔍 Selecciona una playlist para reproducir...",
+            min_values=1,
+            max_values=1,
+            options=options if options else [discord.SelectOption(label="Sin playlists guardadas", value="none")]
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("⚠️ No hay playlists guardadas en este servidor.", ephemeral=True)
+            return
+
+        selected_url = self.values[0]
+        await interaction.response.send_message(f"🚀 Reproduciendo playlist seleccionada: {selected_url}", ephemeral=True)
+        
+        music_cog = interaction.client.get_cog("Music")
+        if music_cog:
+            ctx = await interaction.client.get_context(interaction.message)
+            ctx.author = interaction.user
+            await music_cog.play(ctx, search=selected_url)
+
+
+class PlaylistsView(View):
+    def __init__(self, guild_id, bot):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.bot = bot
+        self.update_components()
+
+    def update_components(self):
+        self.clear_items()
+        from database import get_saved_playlists
+        pls = get_saved_playlists(self.guild_id)
+        if pls:
+            self.add_item(PlaylistSelect(pls))
+
+        btn_add = Button(label="➕ Agregar Playlist", style=discord.ButtonStyle.success)
+        btn_add.callback = self.on_add_click
+        self.add_item(btn_add)
+
+    async def on_add_click(self, interaction: discord.Interaction):
+        modal = AddPlaylistModal(parent_view=self)
+        await interaction.response.send_modal(modal)
+
+    async def refresh(self, interaction: discord.Interaction):
+        self.update_components()
+        from database import get_saved_playlists
+        pls = get_saved_playlists(self.guild_id)
+        embed = discord.Embed(
+            title="📚 Colección de Playlists del Servidor",
+            description=f"Hay **{len(pls)}** playlists guardadas. Selecciona una del menú para empezar a reproducir.",
+            color=0x00d2d3
+        )
+        try:
+            await interaction.message.edit(embed=embed, view=self)
+        except Exception:
+            pass
 
 async def setup(bot):
     await bot.add_cog(MusicUI(bot))
