@@ -470,7 +470,7 @@ async def extract_info(query: str) -> dict:
             "js_runtimes": {"node": {"path": node_path}},
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["mweb", "android"]
+                    "player_client": ["web", "ios", "mweb"]
                 }
             }
         }
@@ -497,7 +497,8 @@ async def extract_info(query: str) -> dict:
                     'url': stream_url,
                     'duration': entry.get('duration', 0),
                     'uploader': entry.get('uploader', 'Artist'),
-                    'thumbnail': entry.get('thumbnail', '')
+                    'thumbnail': entry.get('thumbnail', ''),
+                    'http_headers': entry.get('http_headers', {})
                 }
     except Exception as e:
         print(f"⚠️ Extracción yt-dlp directa falló: {e}", flush=True)
@@ -532,7 +533,8 @@ async def extract_info(query: str) -> dict:
                                     'url': stream_url_p,
                                     'duration': entry_p.get('duration', 0),
                                     'uploader': entry_p.get('uploader', 'Artist'),
-                                    'thumbnail': entry_p.get('thumbnail', '')
+                                    'thumbnail': entry_p.get('thumbnail', ''),
+                                    'http_headers': entry_p.get('http_headers', {})
                                 }
                     except Exception as proxy_err:
                         print(f"⚠️ Proxy {redact_proxy(p_url)} falló: {proxy_err}", flush=True)

@@ -44,7 +44,7 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
             "cookiefile": cookie_path if cookie_path else None,
             "js_runtimes": {"node": {"path": node_path}},
             "remote_components": ["ejs:github"],
-            "extractor_args": {"youtube": {"player_client": ["mweb", "android_creator", "web"]}}
+            "extractor_args": {"youtube": {"player_client": ["web", "ios", "mweb"]}}
         }
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -656,8 +656,12 @@ class MusicPlayerMixin:
                 target_path = player.current_song.get('url')
 
             if target_path and target_path.startswith("http"):
-                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}" -headers "Referer: https://www.youtube.com/\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
+                headers_dict = player.current_song.get('http_headers') or {}
+                user_agent = headers_dict.get('User-Agent') or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                header_lines = "".join(f"{k}: {v}\r\n" for k, v in headers_dict.items() if k.lower() != 'user-agent')
+                if not header_lines:
+                    header_lines = "Referer: https://www.youtube.com/\r\n"
+                before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}" -headers "{header_lines}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
             else:
                 before_opts = '-probesize 64k -analyzeduration 0'
             ffmpeg_options = '-vn -threads 2'
