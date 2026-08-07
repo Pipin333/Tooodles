@@ -38,13 +38,13 @@
 
 **Tooodles** is an asynchronous Python Discord music bot designed for maximum speed, low CPU consumption, and absolute playback stability. It features:
 
-- Direct native `yt-dlp` extraction with Netscape `cookies.txt` authentication
+- Direct native `yt-dlp` extraction with Netscape `cookies.txt` authentication and HTTP 403/429 error resilience
 - Instant Spotify playlist queuing with < 400ms startup
-- Low-latency FFmpeg Opus passthrough (< 0.5% CPU on 1 vCPU)
+- Low-latency FFmpeg Opus passthrough (< 0.5% CPU on 1 vCPU) with `-headers` forwarding
 - **Hybrid ML Recommendation Engine** — Implicit ALS (matrix factorization) + Item2Vec (Word2Vec) + Audio Feature vectors for personalized autoplay
 - **Persistent queue recovery** across bot restarts and redeployments
-- **Zero-downtime CI/CD** via GitHub Actions — push to `main` and the bot waits for the current song to end before restarting
-- Database-backed favorites, dislikes, playback telemetry, saved playlists, and per-guild configuration
+- **Zero-downtime CI/CD** via GitHub Actions with manual `workflow_dispatch` trigger
+- Database-backed favorites, dislikes, playback telemetry, interactive saved playlists, and per-guild configuration
 - **Centralized logging** with automatic rotation (5 MB × 3 backups) and dual-stream output to console + disk
 
 The bot runs inside a Docker container (Python 3.11-slim) and is fully optimized for Oracle Cloud Free Tier (ARM64 Ampere) and any Linux VM.
@@ -55,26 +55,27 @@ The bot runs inside a Docker container (Python 3.11-slim) and is fully optimized
 
 - 🎵 **Multi-Source Playback** — YouTube (URLs or search queries), YouTube Music, Spotify (tracks, playlists, albums & top artist tracks), SoundCloud.
 - ⚡ **Instant Spotify Playlist Loader** — Queues 100+ song Spotify playlists in **< 400ms** by resolving track 1 immediately and loading remaining tracks into queue memory.
-- 🚀 **FFmpeg Opus Passthrough** — Streams WebM/Opus audio natively without CPU-heavy re-encoding (**< 0.5% CPU** on 1 vCPU). Includes `user-agent` and `Referer` headers to prevent YouTube CDN throttling.
-- 🧠 **Hybrid ML Recommendation Engine** — Trains Implicit ALS (256-dim matrix factorization) and Item2Vec (256-dim Word2Vec) models on user listening history. Combines both with 8 acoustic audio features (danceability, energy, valence, tempo, etc.) for multimodal recommendations. Auto-trains every 6 hours.
+- 🚀 **FFmpeg Opus Passthrough & CDN Anti-Block** — Streams WebM/Opus audio natively without CPU-heavy re-encoding (**< 0.5% CPU** on 1 vCPU). Forwards `yt-dlp` `http_headers` (`User-Agent` and `Referer`) directly into FFmpeg to eliminate YouTube 403 CDN errors.
+- 🧠 **Hybrid ML Recommendation Engine** — Trains Implicit ALS (256-dim matrix factorization) and Item2Vec (256-dim Word2Vec) models on user listening history. Combines both with 8 acoustic audio features (danceability, energy, valence, tempo, etc.) for multimodal recommendations. Auto-trains every 6 hours with `threadpoolctl` CPU contention limits.
 - 🤖 **ML Autoplay Mode** — `td?autoplay` generates continuous recommendations using the hybrid engine with temperature-controlled softmax sampling, anti-repetition filtering, and dislike-aware re-ranking.
 - 📻 **Auto-Radio & Group Radio** — `td?radio` generates 5 contextual recommendations using Spotify's genre/artist graph when the queue ends; `td?favradio` builds collective playlists from channel members' favorites.
 - 💾 **Queue Persistence** — When any disconnect or restart occurs, the pending queue + current song are serialized as JSON into SQLite/PostgreSQL. Upon reconnecting with `td?j`, the full queue is restored automatically — **zero songs lost across restarts**.
 - 🔄 **Zero-Downtime Graceful Drain** — On `SIGTERM`/`SIGINT`, the bot saves the queue, disables radio mode, and waits for the current song to finish before shutting down cleanly (up to 10 min timeout).
-- 🤖 **GitHub Actions CI/CD** — Push to `main` and GitHub automatically SSHs into your server, pulls the latest code, rebuilds the Docker image, and triggers a graceful restart.
+- 🤖 **GitHub Actions CI/CD** — Automated deploy on push to `main` or manual trigger via `workflow_dispatch`. SSHs into server, pulls latest code, rebuilds Docker image, and triggers graceful restart.
 - 🧠 **3-Tier Hybrid Queue Buffering**:
   - **Track 1 (Playing)**: Plays smoothly with zero network interference.
   - **Track 2 (Next in Queue)**: Full audio download to `/tmp/cache_{id}.webm` with atomic rename (`.tmp` → `.webm`) for 0ms transition delay. Audio features (BPM, energy, brightness) extracted from the cached file.
   - **Track 3+ (Queued)**: Background URL pre-resolution so streams are pre-fetched before reaching the front of the queue.
+  - **Automated Cache Cleanup**: Periodic loop purges `/tmp` audio files older than 1 hour every 30 minutes.
 - 📊 **Now Playing with Progress Bar** — `td?np` shows elapsed time, total duration, and a visual scrubber (`▬▬▬▬🔘▬▬▬▬▬▬`).
 - ❤️ **User Favorites & Feedback** — Save liked songs (`td?like`), dislike songs (`td?dislike`), view personal favorites (`td?liked`), and check global stats (`td?top`).
 - 📥 **Playlist Preloader** — `td?preload <URL> [@user]` bulk-imports a Spotify/YouTube playlist into the database as likes + play logs for a target user, then retrains the ML model immediately.
-- 📚 **Saved Playlists** — `td?playlists` provides an interactive CRUD manager for server-wide playlist bookmarks.
+- 📚 **Interactive Saved Playlists** — `td?playlists` provides a rich UI with dropdown select menus, pre-filled edit modals, deletion confirm dialogs, and automatic authentic playlist title extraction (`get_playlist_title`).
 - 🛡️ **Trusted Users System** — Bot owner can grant `Trusted` status to users, enabling access to admin/diagnostic commands via DM.
-- 🎛️ **Interactive Discord UI** — Buttons for Pause/Resume, Skip, Stop, Radio toggle, and paginated queue navigation (`td?q`).
-- 🔐 **Cookie Management** — Reads `cookies.txt` from disk or database, with Playwright Stealth fallback for automatic cookie generation via headless Chromium.
-- 🏠 **Per-Guild Configuration** — Custom prefix, queue persistence toggle, restricted command channel, default radio mode — all stored in the database.
-- 📋 **Centralized Logging** — `sznLogger.py` provides rotating file logs (5 MB × 3 backups), colored console output, and dual-stream `stdout`/`stderr` capture.
+- 🎛️ **Ergonomic 2-Row Discord UI** — Redesigned control panel with interactive buttons for Pause/Resume, Skip, Stop, Radio toggle, **Shuffle** (`🔀`), and **Queue** (`📜`) popups.
+- 🔐 **Cookie Management & Error Classification** — Reads `cookies.txt` from disk or database with Playwright Stealth fallback. Classifies extraction errors into `RateLimitError` (HTTP 429) and `ForbiddenBlockError` (HTTP 403) with user alerts.
+- 🏠 **Per-Guild Configuration & SQLite Hardening** — Custom prefix, queue persistence toggle, restricted command channel, default radio mode. Database uses WAL journal mode and `busy_timeout=5000` for concurrency safety.
+- 📋 **Centralized Logging** — `sznLogger.py` provides hierarchical loggers, rotating file logs (5 MB × 3 backups), colored console output, UTF-8 stream handling, and dual-stream `stdout`/`stderr` capture.
 - 💤 **Smart Auto-Disconnect** — Disconnects after 60 seconds of inactivity (empty queue, not playing), and after 30 seconds if left alone in a voice channel.
 
 ---
@@ -113,8 +114,8 @@ The bot runs inside a Docker container (Python 3.11-slim) and is fully optimized
 | Cog | Class | Responsibility |
 |-----|-------|----------------|
 | `sznDB` | `MusicDB` | Database operations: user likes/dislikes, playback history, fuzzy title matching, `favradio`, `top`, `historial` |
-| `sznMusic` | `MusicCore` | Queue state, `yt-dlp` extraction, FFmpeg playback, Spotify integration, hybrid buffering, queue persistence, radio, autoplay, RecSys training loop |
-| `sznUI` | `MusicUI` | Discord button components, now-playing embeds, progress bar, paginated queue view, settings panel, help, logs, trusted users, playlists, debug diagnostics |
+| `sznMusic` | `MusicCore` | Queue state, `yt-dlp` extraction, FFmpeg playback, Spotify integration, hybrid buffering, queue persistence, radio, autoplay, RecSys training loop, disk cache purge loop |
+| `sznUI` | `MusicUI` | 2-row player controls, now-playing embeds, progress bar, paginated queue view, settings panel, help, logs, trusted users, interactive playlists (edit/delete modals), debug diagnostics |
 
 ---
 
@@ -124,15 +125,16 @@ The bot runs inside a Docker container (Python 3.11-slim) and is fully optimized
 Tooodles/
 ├── main.py                        # Bot startup, graceful drain, signal handling, cog loading
 ├── database.py                    # SQLAlchemy models (Song, AppConfig, UserLike, UserDislike,
-│                                  #   PlayLog, SavedPlaylist, TrustedUser) & session handlers
-├── sznUtils.py                    # Audio extraction engine, queue persistence functions
+│                                  #   PlayLog, SavedPlaylist, TrustedUser) & WAL/busy_timeout setup
+├── sznUtils.py                    # Audio extraction engine, get_playlist_title, error classification
+│                                  #   (HTTP 403/429), queue persistence functions
 ├── sznLogger.py                   # Centralized logging: RotatingFileHandler (5MB×3), colored
 │                                  #   console formatter, DualStreamWriter for stdout/stderr capture
 ├── sznMusic/                      # Modular MusicCore package: queue, FFmpeg, Spotify, buffering
 │   ├── __init__.py                # MusicCore Cog, setup(bot), all user-facing commands,
 │   │                              #   background loops (inactivity, cache cleanup, RecSys training)
 │   ├── player.py                  # GuildPlayer state, prefetch_chunk_throttled, audio extraction,
-│   │                              #   Spotify/YouTube resolvers, play_next loop, telemetry logging
+│   │                              #   Spotify/YouTube resolvers, play_next loop, FFmpeg header passthrough
 │   └── radio.py                   # Radio algorithm: 3-layer Spotify genre expansion, GENRE_EXPANSION
 │                                  #   map (40+ genre mappings), ML autoplay via RecSysEngine
 ├── recsys/                        # Hybrid ML Recommendation System
@@ -141,12 +143,12 @@ Tooodles/
 │   │                              #   Features with cosine similarity, re-ranking, and temperature
 │   │                              #   controlled softmax sampling. Responds in < 10ms.
 │   └── train.py                   # Offline training pipeline: builds user-item interaction matrix
-│                                  #   (5 signal types), trains Implicit ALS (256d, 50 iters) and
-│                                  #   Gensim Item2Vec (256d, 100 epochs). Exports to .npz artifacts.
+│                                  #   (5 signal types), trains Implicit ALS (256d, 50 iters) with
+│                                  #   threadpoolctl and Gensim Item2Vec (256d, 100 epochs). Exports .npz.
 ├── sznDB.py                       # MusicDB cog: likes, dislikes, top songs, history, group radio
-├── sznUI.py                       # MusicUI cog: interactive buttons, paginated queue, settings panel,
-│                                  #   help command, saved playlists CRUD, trusted users, logs viewer,
-│                                  #   debug diagnostics, manual RecSys training trigger
+├── sznUI.py                       # MusicUI cog: 2-row interactive player controls (Shuffle/Queue modals),
+│                                  #   paginated queue, settings panel, help, interactive playlists CRUD,
+│                                  #   trusted users, logs viewer, debug diagnostics, RecSys train trigger
 ├── alembic/                       # Database migration scripts (Alembic)
 │   ├── env.py                     # Migration environment configuration
 │   ├── script.py.mako             # Migration template
@@ -162,7 +164,7 @@ Tooodles/
 ├── alembic.ini                    # Alembic configuration
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml             # GitHub Actions CI/CD — auto-deploy on push to main
+│       └── deploy.yml             # GitHub Actions CI/CD — auto-deploy on push to main or workflow_dispatch
 └── .gitignore                     # Excludes cookies.txt, .env, *.db, data/, logs/, /tmp cache
 ```
 
@@ -175,7 +177,7 @@ Tooodles/
 Bot entry point executed by Docker's `CMD`.
 
 **Startup Workflow:**
-1. Executes `setup_database()` to create/migrate database tables.
+1. Executes `setup_database()` to create/migrate database tables with WAL mode and `busy_timeout=5000`.
 2. Checks for `cookies.txt` locally; falls back to database config, then Playwright Stealth auto-generation.
 3. Sets `os.environ["cookies"]` for global availability.
 4. Loads extensions: `sznDB`, `sznMusic`, `sznUI`.
@@ -194,7 +196,7 @@ Bot entry point executed by Docker's `CMD`.
 
 ### `database.py`
 
-Handles database persistence via SQLAlchemy. Supports SQLite (local default with WAL mode + 5000ms busy_timeout) and PostgreSQL (`DATABASE_URL`).
+Handles database persistence via SQLAlchemy. Enforces SQLite WAL mode (`PRAGMA journal_mode=WAL;`) and `PRAGMA busy_timeout=5000;` on connection to prevent database lock issues under high concurrency. Supports PostgreSQL (`DATABASE_URL`).
 
 #### Models
 
@@ -224,13 +226,14 @@ Handles database persistence via SQLAlchemy. Supports SQLite (local default with
 
 ### `sznUtils.py`
 
-Audio extraction module and persistence utilities.
+Audio extraction engine, error handling, playlist title resolution, and persistence utilities.
 
 #### Audio Functions
 
 | Function | Description |
 |----------|-------------|
-| `extract_info(query)` | Primary audio stream extractor. Uses `yt-dlp` with `player_client: ["mweb", "android_creator", "web"]` and cookies. Returns stream metadata dict. |
+| `extract_info(query)` | Primary audio stream extractor. Uses `yt-dlp` with `player_client: ["mweb", "android_creator", "web"]` and cookies. Catches HTTP 429 (`RateLimitError`) and 403 (`ForbiddenBlockError`). |
+| `get_playlist_title(url)` | Fetches authentic playlist titles for Spotify and YouTube URLs for display in UI menus. |
 | `extract_flat_metadata(query)` | Rapid metadata-only lookup using `extract_flat=True` without downloading audio streams. |
 | `extract_playlist_metadata(url)` | Extracts all track metadata from a YouTube/YouTube Music playlist. |
 | `get_cookie_file_path()` | Returns the absolute path to a valid `cookies.txt` file (checks disk root, then database/environment). |
@@ -270,7 +273,7 @@ Core music player package handling queue logic, playback, Spotify resolution, an
 - **`prefetch_chunk_throttled()`**: Downloads full audio to `/tmp/cache_{id}.webm` using atomic `.tmp` → `.webm` rename. Extracts real audio features (BPM, energy, brightness) from cached files. Skips songs > 10 minutes.
 - **`schedule_queue_optimizations()`**: 30-second delayed pre-resolution and pre-caching of the next song in queue (N+1 strategy).
 - **Queue Protection Guard**: `play_next()` uses `asyncio.Lock` and checks `is_playing()` to prevent race conditions.
-- **FFmpeg Opus Passthrough**: Streams native WebM/Opus with `-user_agent` and `-headers "Referer: https://www.youtube.com/"` to prevent YouTube CDN throttling.
+- **FFmpeg Opus Passthrough**: Streams native WebM/Opus with `-user_agent` and `-headers "Referer: https://www.youtube.com/"` passed directly from `yt-dlp` to prevent YouTube 403 CDN errors.
 
 #### `radio.py` — Radio & ML Autoplay
 
@@ -306,12 +309,18 @@ Provides interactive UI controls, configuration panels, and admin tools.
 
 #### User-Facing Features
 
-- **`notify_now_playing()`**: Sends now-playing embeds with interactive buttons (Pause/Resume, Skip, Radio Toggle, Stop, Go to Channel) and auto-deletes after 5 minutes.
+- **`PlayerControlsView`**: 2-row interactive player control panel:
+  - Row 1: Pause/Resume (`⏯️`), Skip (`⏭️`), Radio Toggle (`📻`), Stop (`⏹️`), Command Channel (`📍`)
+  - Row 2: Shuffle (`🔀`), Queue (`📜`) interactive popup modal
+- **`notify_now_playing()`**: Sends now-playing embeds with interactive buttons and auto-deletes after 5 minutes.
 - **Progress Bar in `td?np`**: Calculates elapsed time from `current_song_start_time` and renders a visual scrubber bar.
 - **`td?q`**: Paginated view of the queue with 10 songs per page and navigation buttons.
-- **`td?controls`**: Resends the interactive playback control buttons.
+- **`td?controls`**: Resends the 2-row interactive playback control buttons.
 - **`td?help`**: Context-aware help — shows server commands in guilds or admin/diagnostic commands in DMs.
-- **`td?playlists`**: Interactive CRUD manager for saved server playlists (add, remove, list).
+- **`td?playlists`**: Interactive manager for saved server playlists:
+  - Dropdown select menu for selecting and playing saved playlists
+  - Pre-filled `PlaylistEditModal` for editing playlist titles and URLs
+  - Deletion confirmation dialogs
 - **`td?settings`**: Interactive settings panel with buttons for prefix, persistence, channel lock, and default radio configuration.
 
 #### Admin / Trusted Features (Restricted)
@@ -359,7 +368,7 @@ Designed to run every 6 hours via background loop or manually via `td?train`.
    - `+2.0` for completing ≥ 80% of a song
    - `+1.0` for each play event
    - `-3.0` for skipping within first 30 seconds
-4. Train Implicit ALS (256 factors, 50 iterations, L2 regularization = 0.05).
+4. Train Implicit ALS (256 factors, 50 iterations, L2 regularization = 0.05). Uses `threadpoolctl` to limit OpenBLAS threads to 1 and prevent CPU contention on multi-core VPS.
 5. Extract session sequences (30-min gap threshold) and train Item2Vec (256d, window=10, Skip-gram, 100 epochs).
 6. Build normalized 8-feature audio matrix (danceability, energy, valence, tempo, acousticness, instrumentalness, liveness, speechiness).
 7. Export all artifacts to `data/recsys_artifacts.npz`.
@@ -372,7 +381,7 @@ Designed to run every 6 hours via background loop or manually via `td?train`.
 
 Centralized logging system.
 
-- **`DualStreamWriter`**: Intercepts all `print()` and `sys.stderr` output, duplicating it to `logs/tooodles.log` with timestamps. Strips ANSI color codes for clean file output.
+- **`DualStreamWriter`**: Intercepts all `print()` and `sys.stderr` output, duplicating it to `logs/tooodles.log` with timestamps and UTF-8 stream handling for Windows compatibility. Strips ANSI color codes for clean file output.
 - **`RotatingFileHandler`**: 5 MB per file, 3 backup files (`tooodles.log`, `tooodles.log.1`, `tooodles.log.2`, `tooodles.log.3`).
 - **`ColoredFormatter`**: ANSI-colored log levels for console output (Cyan=DEBUG, Green=INFO, Yellow=WARNING, Red=ERROR).
 - **`get_logger(submodule)`**: Returns a child logger under the `tooodles` namespace (e.g., `tooodles.recsys`, `tooodles.bot`).
@@ -394,7 +403,7 @@ Centralized logging system.
 | `td?resume` | `r`, `reanudar` | Resume paused audio or start playing a restored queue. |
 | `td?stop` | `disconnect`, `leave`, `exit`, `dc` | Stop playback, save queue to DB (if persist enabled), and disconnect. |
 | `td?np` | `nowplaying` | Show now-playing embed with progress bar and elapsed time. |
-| `td?controls` | `ctr`, `player` | Resend the interactive playback buttons. |
+| `td?controls` | `ctr`, `player` | Resend the 2-row interactive playback buttons. |
 
 ### Queue Management
 
@@ -426,8 +435,8 @@ Centralized logging system.
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `td?playlists` | `pl`, `playlist` | Interactive saved playlists manager (list, add, remove). |
-| `td?playlists add <URL> [Alias]` | — | Save a playlist URL with an optional alias. |
+| `td?playlists` | `pl`, `playlist` | Interactive saved playlists manager with dropdown selection, edit modals, and delete dialogs. |
+| `td?playlists add <URL> [Alias]` | — | Save a playlist URL with an optional alias (auto-extracts title). |
 | `td?playlists remove <Name>` | — | Delete a saved playlist by name. |
 | `td?preload <URL> [@user]` | — | Bulk-import a Spotify/YouTube playlist into the DB as likes + play logs for a user, then retrain RecSys. |
 
@@ -502,7 +511,7 @@ Tooodles includes a full hybrid recommendation engine that learns from user list
                  ┌─────────────────────────┐
                  │  Top-5 Recommendations  │
                  │  → Enqueued as songs    │
-                 └─────────────────────────┘
+                 └────────────┬────────────┘
 ```
 
 ### Signal Weights
@@ -626,7 +635,7 @@ Tooodles uses a 3-tier hybrid buffering pipeline designed for instant startup an
 | Audio pre-download (full file) | < 1% |
 | Spotify playlist load (100+ tracks) | ~1–2% for < 400ms |
 | RecSys inference (recommendations) | < 0.1% (< 10ms) |
-| RecSys training (offline) | ~50% for < 2 min |
+| RecSys training (offline) | ~50% for < 2 min (single-threaded OpenBLAS) |
 
 ---
 
@@ -646,10 +655,10 @@ Tooodles uses a 3-tier hybrid buffering pipeline designed for instant startup an
 
 ### GitHub Actions CI/CD
 
-Tooodles ships with a GitHub Actions workflow at `.github/workflows/deploy.yml` that automatically deploys on every push to `main`.
+Tooodles ships with a GitHub Actions workflow at `.github/workflows/deploy.yml` that automatically deploys on every push to `main` or manually via `workflow_dispatch`.
 
 **How it works:**
-1. You push code to `main` from your local machine.
+1. You push code to `main` (or click "Run workflow" in GitHub Actions).
 2. GitHub Actions triggers, SSHs into your server using stored secrets.
 3. Runs `./start.sh` on the server: `git pull` → `docker build` → `docker run`.
 4. The running bot receives `SIGTERM` from Docker and enters Graceful Drain (60s timeout).
