@@ -997,7 +997,7 @@ class MusicUI(commands.Cog):
 
         guild_id = ctx.guild.id
         from database import add_saved_playlist, remove_saved_playlist, get_saved_playlists
-        from sznUtils import extract_info
+        from sznUtils import get_playlist_title
         
         if action and action.lower() in ["add", "agregar", "guardar"]:
             if not args:
@@ -1010,20 +1010,9 @@ class MusicUI(commands.Cog):
 
             msg = await ctx.send("🔍 Obteniendo nombre oficial de la playlist...")
             
-            name = None
-            try:
-                info = await extract_info(url)
-                if isinstance(info, dict):
-                    name = info.get('title')
-                elif isinstance(info, list) and info:
-                    name = info[0].get('playlist_title') or info[0].get('title')
-            except Exception:
-                pass
+            official_title = await get_playlist_title(url)
+            final_name = alias if alias else official_title
 
-            if not name:
-                name = alias or "Playlist Guardada"
-
-            final_name = f"{alias} ({name})" if alias else name
             add_saved_playlist(guild_id, ctx.author.id, final_name, url)
             await msg.edit(content=f"✅ Playlist **{final_name}** guardada correctamente.")
             return
@@ -1081,22 +1070,10 @@ class AddPlaylistModal(Modal, title="➕ Guardar Nueva Playlist"):
         alias = self.alias_input.value.strip() if self.alias_input.value else None
         
         from database import add_saved_playlist
-        from sznUtils import extract_info
+        from sznUtils import get_playlist_title
 
-        name = None
-        try:
-            info = await extract_info(url)
-            if isinstance(info, dict):
-                name = info.get('title')
-            elif isinstance(info, list) and info:
-                name = info[0].get('playlist_title') or info[0].get('title')
-        except Exception:
-            pass
-
-        if not name:
-            name = alias or "Playlist Guardada"
-
-        final_name = f"{alias} ({name})" if alias else name
+        official_title = await get_playlist_title(url)
+        final_name = alias if alias else official_title
         add_saved_playlist(interaction.guild.id, interaction.user.id, final_name, url)
         
         await interaction.followup.send(

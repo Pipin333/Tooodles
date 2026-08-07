@@ -258,6 +258,51 @@ def redact_proxy(proxy_url: str) -> str:
         return ""
     return re.sub(r'://([^:@]+):([^@]+)@', r'://***:***@', proxy_url)
 
+async def get_playlist_title(url: str) -> str:
+    """Extrae el nombre oficial real de una playlist de YouTube o Spotify."""
+    url = url.strip()
+    import re
+    if "spotify.com" in url or "spotify:" in url:
+        match = re.search(r'(playlist|album)[/:]([a-zA-Z0-9]+)', url)
+        if match:
+            stype, sid = match.group(1), match.group(2)
+            try:
+                import aiohttp
+                oembed_url = f"https://open.spotify.com/oembed?url=https://open.spotify.com/{stype}/{sid}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(oembed_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get('title'):
+                                return data['title']
+            except Exception as e:
+                print(f"⚠️ Error al obtener título de playlist Spotify: {e}", flush=True)
+
+    if "youtube.com" in url or "youtu.be" in url:
+        try:
+            from yt_dlp import YoutubeDL
+            cookie_path = get_cookie_file_path()
+            ydl_opts = {
+                "extract_flat": "in_playlist",
+                "skip_download": True,
+                "quiet": True,
+                "nocheckcertificate": True,
+                "cookiefile": cookie_path if cookie_path else None
+            }
+            def _get_title():
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        return info.get('title') or info.get('playlist_title')
+                    return None
+            title = await asyncio.to_thread(_get_title)
+            if title:
+                return title
+        except Exception as e:
+            print(f"⚠️ Error al obtener título de playlist YouTube: {e}", flush=True)
+
+    return "Playlist Guardada"
+
 def extract_playlist_metadata(url: str) -> list[dict]:
     """Extrae metadatos planos de playlists de YouTube o YouTube Music."""
     try:
