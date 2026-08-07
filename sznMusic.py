@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import shutil
 import tempfile
 import time
 import discord
@@ -75,8 +76,9 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
     if os.path.exists(final_cache_path) and os.path.getsize(final_cache_path) > 1024:
         return final_cache_path
 
-    node_path = "/usr/bin/node"
-    cookie_path = None
+    from sznUtils import get_cookie_file_path
+    node_path = shutil.which("node") or shutil.which("nodejs") or "/usr/bin/node"
+    cookie_path = get_cookie_file_path()
 
     def _download():
         from yt_dlp import YoutubeDL
@@ -85,10 +87,10 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
             "outtmpl": temp_cache_path,
             "quiet": True,
             "nocheckcertificate": True,
-            "cookiefile": cookie_path,
+            "cookiefile": cookie_path if cookie_path else None,
             "js_runtimes": {"node": {"path": node_path}},
             "remote_components": ["ejs:github"],
-            "extractor_args": {"youtube": {"player_client": ["mweb", "web_embedded", "web_creator", "web"]}}
+            "extractor_args": {"youtube": {"player_client": ["mweb", "android_creator", "web"]}}
         }
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -628,15 +630,20 @@ class MusicCore(commands.Cog):
 
             self.schedule_queue_optimizations(ctx)
 
-            if not player.current_song.get('url') and not player.current_song.get('cache_path'):
+            curr_url = player.current_song.get('url') or ''
+            has_valid_stream = curr_url.startswith("http") and ("googlevideo.com" in curr_url or "soundgasm" in curr_url or ".webm" in curr_url or ".m4a" in curr_url or ".mp3" in curr_url)
+            has_valid_cache = bool(player.current_song.get('cache_path') and os.path.exists(player.current_song['cache_path']))
+
+            if not has_valid_stream and not has_valid_cache:
                 try:
-                    resolved = await extract_info(player.current_song.get('title', ''))
-                    if resolved:
+                    search_query = player.current_song.get('url') or player.current_song.get('title', '')
+                    resolved = await extract_info(search_query)
+                    if resolved and resolved.get('url'):
                         player.current_song.update(resolved)
                     else:
-                        raise RuntimeError("Failed to resolve stream url.")
+                        raise RuntimeError("Failed to resolve audio stream URL.")
                 except Exception as e:
-                    print(f"⚠️ Error al resolver tema de cola: {e}", flush=True)
+                    print(f"⚠️ Error al resolver tema de cola ({player.current_song.get('title')}): {e}", flush=True)
                     player.current_song = None
                     return
 
