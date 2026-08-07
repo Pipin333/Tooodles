@@ -1145,51 +1145,71 @@ class PlaylistSelect(discord.ui.Select):
 
 
 class EditPlaylistModal(Modal, title="✏️ Editar Playlist Guardada"):
-    old_name_input = TextInput(
-        label="Nombre/Alias Actual de la Playlist",
-        placeholder="Escribe el nombre exacto de la playlist a modificar",
-        min_length=2,
-        max_length=100,
-        required=True
-    )
-    new_name_input = TextInput(
-        label="Nuevo Nombre/Alias (Opcional)",
-        placeholder="Déjalo vacío para conservar el nombre actual",
-        min_length=0,
-        max_length=100,
-        required=False
-    )
-    new_url_input = TextInput(
-        label="Nuevo URL de YouTube o Spotify",
-        placeholder="https://www.youtube.com/playlist?list=... o Spotify URL",
-        min_length=10,
-        max_length=300,
-        required=True
-    )
-
-    def __init__(self, parent_view=None):
+    def __init__(self, old_name: str, current_url: str, parent_view=None):
         super().__init__()
+        self.old_name = old_name
         self.parent_view = parent_view
+
+        self.name_input = TextInput(
+            label="Nombre / Alias de la Playlist",
+            default=old_name,
+            min_length=1,
+            max_length=100,
+            required=True
+        )
+        self.url_input = TextInput(
+            label="URL de YouTube o Spotify",
+            default=current_url,
+            min_length=10,
+            max_length=300,
+            required=True
+        )
+        self.add_item(self.name_input)
+        self.add_item(self.url_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        old_name = self.old_name_input.value.strip()
-        new_name = self.new_name_input.value.strip() if self.new_name_input.value else old_name
-        new_url = self.new_url_input.value.strip()
+        new_name = self.name_input.value.strip()
+        new_url = self.url_input.value.strip()
 
-        from database import remove_saved_playlist, add_saved_playlist, get_saved_playlists
-        pls = get_saved_playlists(interaction.guild.id)
-        match = next((p for p in pls if p['name'].lower() == old_name.lower()), None)
-        if not match:
-            await interaction.followup.send(f"⚠️ No se encontró ninguna playlist llamada **{old_name}**.", ephemeral=True)
-            return
-
-        remove_saved_playlist(interaction.guild.id, match['name'])
+        from database import remove_saved_playlist, add_saved_playlist
+        remove_saved_playlist(interaction.guild.id, self.old_name)
         add_saved_playlist(interaction.guild.id, interaction.user.id, new_name, new_url)
 
-        await interaction.followup.send(f"✏️ Playlist **{old_name}** actualizada a **{new_name}**.", ephemeral=True)
+        await interaction.followup.send(f"✏️ Playlist **{new_name}** actualizada correctamente.", ephemeral=True)
         if self.parent_view:
+            self.parent_view.mode = "play"
             await self.parent_view.refresh(interaction)
+
+
+class EditPlaylistSelect(discord.ui.Select):
+    def __init__(self, playlists, parent_view=None):
+        self.parent_view = parent_view
+        self.playlists_map = {pl['name']: pl['url'] for pl in playlists[:25]}
+        options = []
+        for pl in playlists[:25]:
+            options.append(discord.SelectOption(
+                label=pl['name'][:100],
+                value=pl['name'],
+                description=f"Editar: {pl['url'][:40]}...",
+                emoji="✏️"
+            ))
+        super().__init__(
+            placeholder="✏️ Selecciona la playlist que deseas editar...",
+            min_values=1,
+            max_values=1,
+            options=options if options else [discord.SelectOption(label="Sin playlists guardadas", value="none")]
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.send_message("⚠️ No hay playlists guardadas para editar.", ephemeral=True)
+            return
+
+        target_name = self.values[0]
+        current_url = self.playlists_map.get(target_name, "")
+        modal = EditPlaylistModal(old_name=target_name, current_url=current_url, parent_view=self.parent_view)
+        await interaction.response.send_modal(modal)
 
 
 class DeletePlaylistSelect(discord.ui.Select):
@@ -1242,6 +1262,8 @@ class PlaylistsView(View):
         if pls:
             if self.mode == "delete":
                 self.add_item(DeletePlaylistSelect(pls, parent_view=self))
+            elif self.mode == "edit":
+                self.add_item(EditPlaylistSelect(pls, parent_view=self))
             else:
                 self.add_item(PlaylistSelect(pls))
 
@@ -1249,12 +1271,17 @@ class PlaylistsView(View):
         btn_add.callback = self.on_add_click
         self.add_item(btn_add)
 
-        btn_edit = Button(label="✏️ Editar", style=discord.ButtonStyle.secondary)
-        btn_edit.callback = self.on_edit_click
-        self.add_item(btn_edit)
+        if self.mode == "edit":
+            btn_edit = Button(label="◀️ Reproducir", style=discord.ButtonStyle.primary)
+            btn_edit.callback = self.on_toggle_edit_mode
+            self.add_item(btn_edit)
+        else:
+            btn_edit = Button(label="✏️ Editar", style=discord.ButtonStyle.secondary)
+            btn_edit.callback = self.on_toggle_edit_mode
+            self.add_item(btn_edit)
 
         if self.mode == "delete":
-            btn_del = Button(label="◀️ Seleccionar", style=discord.ButtonStyle.primary)
+            btn_del = Button(label="◀️ Reproducir", style=discord.ButtonStyle.primary)
             btn_del.callback = self.on_toggle_delete_mode
             self.add_item(btn_del)
         else:
@@ -1266,9 +1293,9 @@ class PlaylistsView(View):
         modal = AddPlaylistModal(parent_view=self)
         await interaction.response.send_modal(modal)
 
-    async def on_edit_click(self, interaction: discord.Interaction):
-        modal = EditPlaylistModal(parent_view=self)
-        await interaction.response.send_modal(modal)
+    async def on_toggle_edit_mode(self, interaction: discord.Interaction):
+        self.mode = "play" if self.mode == "edit" else "edit"
+        await self.refresh(interaction)
 
     async def on_toggle_delete_mode(self, interaction: discord.Interaction):
         self.mode = "play" if self.mode == "delete" else "delete"
@@ -1278,11 +1305,20 @@ class PlaylistsView(View):
         self.update_components()
         from database import get_saved_playlists
         pls = get_saved_playlists(self.guild_id)
-        mode_desc = "Modo Eliminar: selecciona una playlist en el menú para borrarla." if self.mode == "delete" else "Selecciona una playlist en el menú desplegable para reproducirla de inmediato."
+        if self.mode == "delete":
+            mode_desc = "Modo Eliminar: selecciona una playlist en el menú para borrarla."
+            color = 0xff3f34
+        elif self.mode == "edit":
+            mode_desc = "Modo Editar: selecciona una playlist en el menú para modificar su nombre o enlace."
+            color = 0xffa801
+        else:
+            mode_desc = "Selecciona una playlist en el menú desplegable para reproducirla de inmediato."
+            color = 0x00d2d3
+
         embed = discord.Embed(
             title="📚 Colección de Playlists del Servidor",
             description=f"Hay **{len(pls)}** playlists guardadas.\n{mode_desc}",
-            color=0x00d2d3 if self.mode == "play" else 0xff3f34
+            color=color
         )
         if pls:
             pl_lines = [f"• **{p['name']}** — `{p['url'][:45]}...`" for p in pls[:10]]
