@@ -740,20 +740,40 @@ class MusicUI(commands.Cog):
 
         guild_id = ctx.guild.id
         from database import add_saved_playlist, remove_saved_playlist, get_saved_playlists
+        from sznUtils import extract_info
         
         if action and action.lower() in ["add", "agregar", "guardar"]:
-            if not args or " " not in args:
-                await ctx.send("⚠️ Uso: `td?playlist add <Nombre> <URL>` (ej: `td?playlist add Cumbia90s https://...`)")
+            if not args:
+                await ctx.send("⚠️ Uso: `td?playlist add <URL> [Alias opcional]`")
                 return
-            parts = args.split(" ", 1)
-            name, url = parts[0], parts[1]
-            add_saved_playlist(guild_id, ctx.author.id, name, url)
-            await ctx.send(f"✅ Playlist **{name}** guardada correctamente.")
+            
+            parts = args.strip().split(" ", 1)
+            url = parts[0]
+            alias = parts[1] if len(parts) > 1 else None
+
+            msg = await ctx.send("🔍 Obteniendo nombre oficial de la playlist...")
+            
+            name = None
+            try:
+                info = await extract_info(url)
+                if isinstance(info, dict):
+                    name = info.get('title')
+                elif isinstance(info, list) and info:
+                    name = info[0].get('playlist_title') or info[0].get('title')
+            except Exception:
+                pass
+
+            if not name:
+                name = alias or "Playlist Guardada"
+
+            final_name = f"{alias} ({name})" if alias else name
+            add_saved_playlist(guild_id, ctx.author.id, final_name, url)
+            await msg.edit(content=f"✅ Playlist **{final_name}** guardada correctamente.")
             return
 
         if action and action.lower() in ["remove", "del", "delete", "eliminar"]:
             if not args:
-                await ctx.send("⚠️ Uso: `td?playlist remove <Nombre>`")
+                await ctx.send("⚠️ Uso: `td?playlist remove <Nombre o Alias>`")
                 return
             ok = remove_saved_playlist(guild_id, args)
             if ok:
@@ -769,23 +789,16 @@ class MusicUI(commands.Cog):
             color=0x00d2d3
         )
         if pls:
-            pl_lines = [f"• **{p['name']}** — `{p['url'][:50]}...`" for p in pls[:10]]
+            pl_lines = [f"• **{p['name']}** — `{p['url'][:45]}...`" for p in pls[:10]]
             embed.add_field(name="📋 Playlists Guardadas", value="\n".join(pl_lines), inline=False)
         else:
-            embed.add_field(name="ℹ️ Colección vacía", value="Aún no hay playlists guardadas. Usa el botón `➕ Agregar Playlist` o `td?playlist add <Nombre> <URL>`.", inline=False)
+            embed.add_field(name="ℹ️ Colección vacía", value="Aún no hay playlists guardadas. Usa el botón `➕ Agregar Playlist` o `td?playlist add <URL>`.", inline=False)
 
         view = PlaylistsView(guild_id, self.bot)
         await ctx.send(embed=embed, view=view)
 
 
 class AddPlaylistModal(Modal, title="➕ Guardar Nueva Playlist"):
-    name_input = TextInput(
-        label="Nombre de la Playlist",
-        placeholder="ej: Cumbia 90s, Nightcore, Chill Lofi",
-        min_length=2,
-        max_length=40,
-        required=True
-    )
     url_input = TextInput(
         label="Link de YouTube o Spotify",
         placeholder="https://www.youtube.com/playlist?list=... o Spotify URL",
@@ -793,19 +806,44 @@ class AddPlaylistModal(Modal, title="➕ Guardar Nueva Playlist"):
         max_length=300,
         required=True
     )
+    alias_input = TextInput(
+        label="Alias Opcional (ej: Cumbia 90s, Mambo)",
+        placeholder="Déjalo vacío para usar el nombre oficial automático",
+        min_length=0,
+        max_length=40,
+        required=False
+    )
 
     def __init__(self, parent_view=None):
         super().__init__()
         self.parent_view = parent_view
 
     async def on_submit(self, interaction: discord.Interaction):
-        name = self.name_input.value.strip()
+        await interaction.response.defer(ephemeral=True)
         url = self.url_input.value.strip()
-        from database import add_saved_playlist
-        add_saved_playlist(interaction.guild.id, interaction.user.id, name, url)
+        alias = self.alias_input.value.strip() if self.alias_input.value else None
         
-        await interaction.response.send_message(
-            f"✅ Playlist **{name}** guardada correctamente.",
+        from database import add_saved_playlist
+        from sznUtils import extract_info
+
+        name = None
+        try:
+            info = await extract_info(url)
+            if isinstance(info, dict):
+                name = info.get('title')
+            elif isinstance(info, list) and info:
+                name = info[0].get('playlist_title') or info[0].get('title')
+        except Exception:
+            pass
+
+        if not name:
+            name = alias or "Playlist Guardada"
+
+        final_name = f"{alias} ({name})" if alias else name
+        add_saved_playlist(interaction.guild.id, interaction.user.id, final_name, url)
+        
+        await interaction.followup.send(
+            f"✅ Playlist **{final_name}** guardada correctamente.",
             ephemeral=True
         )
         if self.parent_view:
