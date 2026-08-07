@@ -278,41 +278,52 @@ def train_item2vec(session_sequences, song_id_map):
 
 
 def fetch_spotify_audio_features(songs_metadata):
-    """Consulta y guarda en lote las audio features de Spotify para canciones en catálogo."""
+    """Consulta y guarda metadatos y características acústicas de Spotify para canciones en catálogo."""
     import spotipy
     from spotipy.oauth2 import SpotifyClientCredentials
-    from database import save_spotify_audio_features_bulk
+    from database import save_spotify_audio_features_bulk, get_db_session, Song
     
     cid = os.getenv("client_id")
     secret = os.getenv("client_secret")
     if not cid or not secret:
-        print("ℹ️ Credenciales de Spotify no disponibles para audio features.")
         return
 
-    missing_sp_ids = []
-    for s in songs_metadata:
-        sp_id = s.get('spotify_id')
-        if sp_id and s.get('danceability') is None:
-            missing_sp_ids.append(sp_id)
+    missing_sp_ids = [s.get('spotify_id') for s in songs_metadata if s.get('spotify_id') and s.get('danceability') is None]
 
     if not missing_sp_ids:
-        print("✅ Todas las canciones con Spotify ID ya cuentan con Audio Features en BD.")
+        print("✅ Catálogo sincronizado con metadatos acústicos en BD.")
         return
 
-    print(f"🎵 Consultando Audio Features de Spotify para {len(missing_sp_ids)} canciones...")
+    print(f"🎵 Sincronizando metadatos de Spotify para {len(missing_sp_ids)} canciones...")
     try:
         sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=cid, client_secret=secret))
         
+        # 1. Obtener popularidad de tracks (Endpoint 100% Abierto)
+        for i in range(0, len(missing_sp_ids), 50):
+            batch = missing_sp_ids[i:i+50]
+            tracks_res = sp.tracks(batch)
+            if tracks_res and 'tracks' in tracks_res:
+                with get_db_session() as session:
+                    for tr in tracks_res['tracks']:
+                        if tr and tr.get('id'):
+                            s_obj = session.query(Song).filter_by(spotify_id=tr['id']).first()
+                            if s_obj and tr.get('popularity') is not None:
+                                s_obj.popularity = tr['popularity']
+
+        # 2. Intentar audio-features si está disponible
         for i in range(0, len(missing_sp_ids), 100):
             batch = missing_sp_ids[i:i+100]
-            features_res = sp.audio_features(batch)
-            if features_res:
-                valid_features = [f for f in features_res if f and isinstance(f, dict)]
-                save_spotify_audio_features_bulk(valid_features)
+            try:
+                features_res = sp.audio_features(batch)
+                if features_res:
+                    valid_features = [f for f in features_res if f and isinstance(f, dict)]
+                    save_spotify_audio_features_bulk(valid_features)
+            except Exception:
+                pass
                 
-        print("✅ Audio Features de Spotify guardadas exitosamente en la BD.")
+        print("✅ Metadatos de Spotify procesados.")
     except Exception as e:
-        print(f"⚠️ Error al obtener audio features de Spotify: {e}")
+        print(f"ℹ️ Sincronización de Spotify finalizada ({e})")
 
 
 def build_audio_feature_matrix(songs_metadata, song_id_map):

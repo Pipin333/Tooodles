@@ -347,6 +347,27 @@ def save_spotify_audio_features_bulk(features_list: list[dict]):
                 song.liveness = f.get('liveness')
                 song.speechiness = f.get('speechiness')
 
+def update_song_audio_features(song_identifier, features_dict: dict):
+    """Actualiza las características acústicas de una canción por ID o por título."""
+    if not features_dict or not isinstance(features_dict, dict):
+        return
+    with get_db_session() as session:
+        song = None
+        if isinstance(song_identifier, int):
+            song = session.query(Song).filter_by(id=song_identifier).first()
+        else:
+            song = session.query(Song).filter_by(title=str(song_identifier)).first()
+        
+        if song:
+            if 'danceability' in features_dict: song.danceability = features_dict['danceability']
+            if 'energy' in features_dict: song.energy = features_dict['energy']
+            if 'valence' in features_dict: song.valence = features_dict['valence']
+            if 'tempo' in features_dict: song.tempo = features_dict['tempo']
+            if 'acousticness' in features_dict: song.acousticness = features_dict['acousticness']
+            if 'instrumentalness' in features_dict: song.instrumentalness = features_dict['instrumentalness']
+            if 'liveness' in features_dict: song.liveness = features_dict['liveness']
+            if 'speechiness' in features_dict: song.speechiness = features_dict['speechiness']
+
 def get_session_sequences(guild_id=None, session_gap_minutes=30):
     """Extrae secuencias de reproducción por sesión para entrenamiento Item2Vec.
     

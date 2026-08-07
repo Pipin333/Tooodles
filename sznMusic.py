@@ -102,6 +102,17 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
             os.replace(temp_cache_path, final_cache_path)
             song_info['cache_path'] = final_cache_path
             print(f"⚡ Audio completo precargado en caché: {final_cache_path}", flush=True)
+            
+            try:
+                from sznUtils import extract_local_audio_features
+                from database import update_song_audio_features
+                feats = await asyncio.to_thread(extract_local_audio_features, final_cache_path)
+                if feats:
+                    await asyncio.to_thread(update_song_audio_features, song_info.get('title'), feats)
+                    print(f"🎼 Métricas acústicas reales extraídas ({song_info.get('title')}): BPM={feats.get('tempo')}, Energy={feats.get('energy')}, Brightness={feats.get('valence')}", flush=True)
+            except Exception as feat_err:
+                print(f"⚠️ Error al analizar métricas de audio: {feat_err}", flush=True)
+
             return final_cache_path
     except Exception as e:
         print(f"⚠️ Precarga de audio completa falló: {e}", flush=True)
