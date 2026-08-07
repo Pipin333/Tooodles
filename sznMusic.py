@@ -654,10 +654,11 @@ class MusicCore(commands.Cog):
             if not target_path or not os.path.exists(target_path):
                 target_path = player.current_song.get('url')
 
-            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}"'
             if target_path and target_path.startswith("http"):
-                before_opts += ' -headers "Referer: https://www.youtube.com/\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
+                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}" -headers "Referer: https://www.youtube.com/\r\n" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
+            else:
+                before_opts = '-probesize 64k -analyzeduration 0'
             ffmpeg_options = '-vn -threads 2'
 
             def after_playing(error):
