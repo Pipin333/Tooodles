@@ -100,6 +100,7 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
         await asyncio.to_thread(_download)
         if os.path.exists(temp_cache_path) and os.path.getsize(temp_cache_path) > 1024:
             os.replace(temp_cache_path, final_cache_path)
+            song_info['cache_path'] = final_cache_path
             print(f"⚡ Audio completo precargado en caché: {final_cache_path}", flush=True)
             return final_cache_path
     except Exception as e:
@@ -303,7 +304,9 @@ class MusicCore(commands.Cog):
                         if resolved:
                             s.update(resolved)
                     if s.get('url'):
-                        await prefetch_chunk_throttled(s)
+                        cached_file = await prefetch_chunk_throttled(s)
+                        if cached_file:
+                            s['cache_path'] = cached_file
             except Exception as e:
                 print(f"⚠️ Error en precarga diferida a los 30s: {e}", flush=True)
             finally:
