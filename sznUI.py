@@ -372,7 +372,45 @@ class MusicUI(commands.Cog):
                     
             await interaction.followup.send(f"🤖 Autoplay ML **{status}**.", ephemeral=True)
 
-        @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop", row=1)
+        @discord.ui.button(label="🔀 Shuffle", style=discord.ButtonStyle.secondary, custom_id="shuffle_queue", row=1)
+        async def shuffle_queue(self, interaction: discord.Interaction, button: Button):
+            player = self.get_player()
+            if not player.song_queue:
+                await interaction.response.send_message("⚠️ La cola está vacía, no hay nada que mezclar.", ephemeral=True)
+                return
+            import random
+            random.shuffle(player.song_queue)
+            await interaction.response.send_message(f"🔀 Cola mezclada aleatoriamente ({len(player.song_queue)} canciones).", ephemeral=True)
+
+        @discord.ui.button(label="📋 Cola", style=discord.ButtonStyle.secondary, custom_id="show_queue", row=1)
+        async def show_queue(self, interaction: discord.Interaction, button: Button):
+            player = self.get_player()
+            if not player.current_song and not player.song_queue:
+                await interaction.response.send_message("📭 La cola está vacía.", ephemeral=True)
+                return
+
+            lines = []
+            if player.current_song:
+                title = player.current_song.get('title', '?')
+                dur = self.core.format_duration(player.current_song.get('duration', 0))
+                lines.append(f"▶️ **{title}** `[{dur}]`")
+
+            for i, s in enumerate(player.song_queue[:10], 1):
+                dur = self.core.format_duration(s.get('duration', 0))
+                lines.append(f"`{i:02d}.` **{s['title']}** `[{dur}]`")
+
+            if len(player.song_queue) > 10:
+                lines.append(f"*...y {len(player.song_queue) - 10} más.*")
+
+            embed = discord.Embed(
+                title="📋 Cola de Reproducción",
+                description="\n".join(lines),
+                color=0x7d5fff
+            )
+            embed.set_footer(text=f"{len(player.song_queue)} canciones en cola")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @discord.ui.button(label="⏹️ Detener", style=discord.ButtonStyle.danger, custom_id="stop", row=2)
         async def stop(self, interaction: discord.Interaction, button: Button):
             player = self.get_player()
             if player.voice_client:
